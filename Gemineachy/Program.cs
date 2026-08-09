@@ -15,7 +15,7 @@ var appBaseUri = new Uri(JS.AppBaseUri);
 var isBrowserExtensionContentScript = JS.GlobalScope == GlobalScope.Window && appBaseUri.Scheme.Contains("-extension");
 
 // We'll add components based what the environment is detected
-if (isBrowserExtensionContentScript)
+if (isBrowserExtensionContentScript || true)
 {
     // When running as browser extension content script we'll render Apptray.razor instead of an App.razor
     // And we'll add styling to the host itself that will be created to handle the ShadowRoot so it renders out-of-line from the website's own elements
@@ -26,6 +26,9 @@ else
     // Add root components
     builder.RootComponents.Add<App>(new AttachShadowRootOptions { Mode = "open" });
 }
+
+// App's generated styles
+builder.RootComponents.AddSharedStyleSheet("Gemineachy.styles.css");
 
 // register WebWorkerService
 builder.Services.AddWebWorkerService();

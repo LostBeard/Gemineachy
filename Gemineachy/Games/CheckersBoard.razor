@@ -1,0 +1,112 @@
+﻿@using Gemineachy.Games
+@using Gemineachy.Services
+@using SpawnDev.SpawnJS.JSObjects
+@using System.Text.RegularExpressions
+@using File = SpawnDev.SpawnJS.JSObjects.File
+@inject GeminiChatService _geminiChatService
+@implements IAsyncDisposable
+
+<div class="checkers-container">
+    <div class="status-banner">@Game.StatusMessage</div>
+    <div class="board-grid">
+        @for (int r = 0; r < 8; r++)
+        {
+            int row = r;
+            @for (int c = 0; c < 8; c++)
+            {
+                int col = c;
+                bool isDark = (row + col) % 2 == 1;
+                bool isSelected = Game.SelectedSquare?.Row == row && Game.SelectedSquare?.Col == col;
+                var piece = Game.Board[row, col];
+
+                <div class="@GetSquareClass(isDark, isSelected)" @onclick="() => SquareClicked(row, col)">
+                    @if (piece != PieceType.None)
+                    {
+                        <div class="@GetPieceClass(piece)">
+                            @(piece == PieceType.RedKing || piece == PieceType.BlackKing ? "♔" : "")
+                        </div>
+                    }
+                </div>
+            }
+        }
+    </div>
+    <button class="reset-btn" @onclick="ResetGame">Reset Game</button>
+</div>
+
+@code {
+    private CheckersGame Game = new();
+
+    private void SquareClicked(int row, int col)
+    {
+        Game.SelectSquare(row, col);
+        StateHasChanged();
+    }
+
+    private void ResetGame()
+    {
+        Game.InitializeBoard();
+        StateHasChanged();
+    }
+
+    private string GetSquareClass(bool isDark, bool isSelected)
+    {
+        string baseClass = "square ";
+        baseClass += isDark ? "dark-square" : "light-square";
+        if (isSelected) baseClass += " selected";
+        return baseClass;
+    }
+
+    private string GetPieceClass(PieceType piece) => piece switch
+    {
+        PieceType.Red or PieceType.RedKing => "piece red-piece",
+        PieceType.Black or PieceType.BlackKing => "piece black-piece",
+        _ => ""
+    };
+
+    bool _beenInit = false;
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        base.OnAfterRender(firstRender);
+        if (!_beenInit)
+        {
+            _beenInit = true;
+            _geminiChatService.OnQueryResponse += GeminiChatService_OnQueryResponse;
+            var playerGoesFirst = true;
+            // At this point the game board has opened up
+            // We need to tell Gemini what is happening
+            // 
+            await _geminiChatService.Query($@"{nameof(Gemineachy)} browser extension says: The user has challenged Gemini to a game of checkers. The user will play on a visual checkboard and the game state and turn data will be relayed through chat to Gemini. Gemini is black and the player is red. Red will go first.", $"{nameof(CheckersGame)}-board.txt", Game.GetBoardStateText());
+
+        }
+    }
+    string _Gameplay = @"";
+    /// <summary>
+    /// Simply tool call listener<br/>
+    /// Checks for tool calls in the agent's response
+    /// </summary>
+    void GeminiChatService_OnQueryResponse(string query, string response)
+    {
+        var toolCalls = Regex.Matches(response, @"\[TOOL_REQUEST:?\s+(.*?)\]", RegexOptions.IgnoreCase);
+        foreach (Match m in toolCalls)
+        {
+            var tool = m.Groups[1].Value.Trim();
+            Console.WriteLine($"Tool call: " + tool);
+            switch (tool)
+            {
+                case "get_time":
+                    _ = _geminiChatService.Query($"[TOOL_RESPONSE: get_time] -> {DateTime.Now.ToString()}");
+                    break;
+            }
+        }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        if (_beenInit)
+        {
+            _beenInit = false;
+            // tell Gemini the game has been closed and is now over
+
+            _geminiChatService.OnQueryResponse -= GeminiChatService_OnQueryResponse;
+        }
+    }
+}

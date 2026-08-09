@@ -1,4 +1,5 @@
-﻿@using Gemineachy.Services
+﻿@using Gemineachy.Games
+@using Gemineachy.Services
 @using SpawnDev.SpawnJS.JSObjects
 @using System.Text.RegularExpressions
 @using File = SpawnDev.SpawnJS.JSObjects.File
@@ -11,9 +12,13 @@
         <UiButton OnClick="IntroduceTools">Introduce Tools</UiButton>
         <UiButton OnClick="TestAsyncQueryResponse">Test Queries</UiButton>
         <UiButton OnClick="TestFileAttachment">Test Files</UiButton>
+        <UiButton OnClick="@(()=> _checkers = !_checkers)">Play Checkers</UiButton>
     }
     <UiDialog @bind-Open="_dialogOpen" Title="Hello from RazorUI">
         This dialog is rendered by SpawnDomRenderer and styled by the adopted RazorUI sheet. Click the backdrop to close.
+    </UiDialog>
+    <UiDialog @bind-Open="_checkers" Title="Checkers">
+        <CheckersBoard />
     </UiDialog>
 </div>
 
@@ -21,6 +26,7 @@
 
     bool _extend = false;
     bool _dialogOpen = false;
+    bool _checkers = false;
     bool _beenInit = false;
     protected override void OnAfterRender(bool firstRender)
     {
@@ -78,9 +84,13 @@ To ask me the time simply respond to the user ""[TOOL_REQUEST: get_time]"" and I
     /// <returns></returns>
     async Task TestFileAttachment()
     {
-        using var myFileA = new File(["Hellow world A!"], "myfileA.txt", new FileOptions { Type = "text/plain" });
-        using var myFileB = new File(["Hellow world B!"], "myfileB.txt", new FileOptions { Type = "text/plain" });
-        await _geminiChatService.Query("This is a test of programmatic file attachment.", [myFileA, myFileB]);
+        var files = new List<File>();
+        for(var i = 1; i < 12; i++)
+        {
+            var file = new File([$"Hellow world #{i}! This is in file: 'myfile_{i}.txt'"], $"myfile_{i}.txt", new FileOptions { Type = "text/plain" });
+            files.Add(file);
+        }
+        await _geminiChatService.Query($"This is a test of programmatic file attachment. Trying to verify the attachment of {files.Count} files.", files);
     }
     public void Dispose()
     {
