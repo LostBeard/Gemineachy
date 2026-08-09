@@ -1,15 +1,12 @@
 ﻿using SpawnDev;
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
-using SpawnDev.SpawnJS.Native;
 using SpawnDev.SpawnJS.RazorRenderer;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 using File = SpawnDev.SpawnJS.JSObjects.File;
-using FileOptions = SpawnDev.SpawnJS.JSObjects.FileOptions;
 
 namespace Gemineachy.Services
 {
@@ -78,10 +75,19 @@ namespace Gemineachy.Services
                         });
                     }
                     // register tools this service provides
-                    RegisterTool(SendToolInfo, "Re-sends the full tool manifest to you. Call if you have lost track of the available tools.");
-                    RegisterTool(GetTypeInfo, "Returns the C#-like structure (public properties) of a .NET type used by a tool. Pass the type name shown in a tool's schema.");
-                    RegisterTool(GetTime, "Returns the user's current local date and time as a string.");
-                    RegisterTool(Echo, "Echoes the message back. Minimal connectivity test. Do not call this in a loop.");
+                    //RegisterTool(SendToolInfo, "Re-sends the full tool manifest to you. Call if you have lost track of the available tools.");
+                    //RegisterTool(GetTypeInfo, "Returns the C#-like structure (public properties) of a .NET type used by a tool. Pass the type name shown in a tool's schema.");
+                    //RegisterTool(GetTime, "Returns the user's current local date and time as a string.");
+                    //RegisterTool(Echo, "Echoes the message back. Minimal connectivity test. Do not call this in a loop.");
+
+                    try
+                    {
+                        Register(this);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Could not register {ex.ToString()}");
+                    }
 
                     // Send the manifest AFTER the UI has rendered, not as part of Ready. The renderer
                     // starts only once every IAsyncBackgroundService.Ready has completed, so blocking
@@ -229,6 +235,7 @@ namespace Gemineachy.Services
         /// </summary>
         /// <param name="typeName"></param>
         /// <returns></returns>
+        [AgentTool("Returns the C#-like structure (public properties) of a .NET type used by a tool. Pass the type name shown in a tool's schema.")]
         public string GetTypeInfo(string typeName)
         {
             if (string.IsNullOrWhiteSpace(typeName)) return "// error: typeName was empty";
@@ -244,7 +251,7 @@ namespace Gemineachy.Services
             var seen = new HashSet<Type>();
             var queue = new Queue<Type>();
             foreach (var t in Tools.Values)
-                foreach (var p in t.ToolHandler.Method.GetParameters())
+                foreach (var p in t.MethodInfo.GetParameters())
                     queue.Enqueue(p.ParameterType);
             while (queue.Count > 0)
             {
@@ -279,10 +286,51 @@ namespace Gemineachy.Services
             sb.AppendLine("}");
             return sb.ToString();
         }
+        [AgentTool("Returns the user's current local date and time as a string.")]
         string GetTime() => DateTime.Now.ToString();
         public bool UnregisterTool(string toolName)
         {
             return Tools.Remove(toolName);
+        }
+        public void Register<TType>(TType implementation) where TType : class
+        {
+            var typeName = typeof(TType).Name;
+            var ret = new List<ToolCall>();
+            var methods = implementation!.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            foreach (var method in methods)
+            {
+                var agentToolAttribute = method.GetCustomAttribute<AgentToolAttribute>();
+                if (agentToolAttribute == null) continue;
+                // tool name
+                var toolName = $"{typeName}.{method.Name}";
+                // check if exists
+                if (Tools.ContainsKey(toolName))
+                {
+                    // Tool already registered
+                    continue;
+                }
+                try
+                {
+                    // register
+                    RegisterTool(new ToolCall(toolName, typeof(TType), method, implementation, agentToolAttribute.Description));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Could not register: {toolName}" + ex.ToString());
+                }
+            }
+        }
+        public void Unregister<TType>(TType implementation)
+        {
+            var typeName = typeof(TType).Name;
+            var methods = implementation!.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            foreach (var method in methods)
+            {
+                var agentToolAttribute = method.GetCustomAttribute<AgentToolAttribute>();
+                if (agentToolAttribute == null) continue;
+                var toolName = $"{typeName}.{method.Name}";
+                UnregisterTool(toolName);
+            }
         }
         public void RegisterTool(ToolCall tool)
         {
@@ -291,40 +339,43 @@ namespace Gemineachy.Services
         }
         public void RegisterTool(Delegate fn, string description = "")
         {
-            var typeName = fn.Target?.GetType().Name ?? fn.Method.ReflectedType?.Name ?? fn.Method.DeclaringType?.Name ?? "_";
-            var tool = new ToolCall
-            {
-                ToolName = $"{typeName}.{fn.Method.Name}",
-                ToolHandler = fn,
-                Signature = DelegateFormatter.GetCsharpSignature(fn),
-                Description = description
-            };
-            RegisterTool(tool);
+            var type = fn.Target?.GetType() ?? fn.Method.ReflectedType ?? fn.Method.DeclaringType!;
+            var typeName = type.Name;
+            var toolName = $"{typeName}.{fn.Method.Name}";
+            RegisterTool(new ToolCall(toolName, type, fn.Method, fn.Target, description));
         }
         public void RegisterTool<TType>(Delegate fn, string description = "")
         {
-            var typeName = typeof(TType).Name;
-            var tool = new ToolCall
-            {
-                ToolName = $"{typeName}.{fn.Method.Name}",
-                ToolHandler = fn,
-                Signature = DelegateFormatter.GetCsharpSignature(fn),
-                Description = description
-            };
-            RegisterTool(tool);
+            var type = typeof(TType);
+            var typeName = type.Name;
+            var toolName = $"{typeName}.{fn.Method.Name}";
+            RegisterTool(new ToolCall(toolName, type, fn.Method, fn.Target, description));
         }
+        [AgentTool("Echoes the message back. Minimal connectivity test. Do not call this in a loop.")]
         async Task<string> Echo(string message)
         {
             Console.WriteLine($"Echo was called: {message}");
             return message;
         }
+        [AgentTool("Re-sends the full tool manifest to you. Call if you have lost track of the available tools.")]
         public async Task SendToolInfo()
         {
             var manifest = ToolProtocol.BuildManifest(Tools.Values);
             // Protocol instructions live in the visible message; the full schema rides as an attachment
             // so it does not clutter the chat. The manifest text is self-contained either way.
-            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest",
-                ToolProtocol.ManifestFileName, manifest);
+            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest", ToolProtocol.ManifestFileName, manifest);
+        }
+        /// <summary>
+        /// Send the current tool info to the agent
+        /// </summary>
+        /// <param name="addendum">Add context to why the tool info is being sent.</param>
+        /// <returns></returns>
+        public async Task SendToolInfo(string addendum)
+        {
+            var manifest = ToolProtocol.BuildManifest(Tools.Values);
+            // Protocol instructions live in the visible message; the full schema rides as an attachment
+            // so it does not clutter the chat. The manifest text is self-contained either way.
+            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest (Addendum: {addendum})", ToolProtocol.ManifestFileName, manifest);
         }
         private void Mutation_Observed()
         {
@@ -476,11 +527,11 @@ namespace Gemineachy.Services
 
             try
             {
-                var method = tool.ToolHandler.Method;
+                var method = tool.MethodInfo;
                 var parameters = method.GetParameters();
                 if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, out var argValues, out var bindError))
                     return new { tool = call.Tool, ok = false, error = bindError };
-                var result = await InvokeMaybeAsync(tool.ToolHandler, argValues, method.ReturnType);
+                var result = await InvokeMaybeAsync(tool, argValues, method.ReturnType);
                 Console.WriteLine($"Tool '{call.Tool}' invoked.");
                 return new { tool = call.Tool, ok = true, result };
             }
@@ -492,10 +543,23 @@ namespace Gemineachy.Services
             }
         }
 
+        ///// <summary>Invoke a delegate that may be synchronous, Task, or Task&lt;T&gt;, returning its value.</summary>
+        //static async Task<object?> InvokeMaybeAsync(Delegate handler, object?[] args, Type returnType)
+        //{
+        //    var result = handler.DynamicInvoke(args);
+        //    if (result is Task task)
+        //    {
+        //        await task.ConfigureAwait(false);
+        //        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
+        //            return returnType.GetProperty("Result")!.GetValue(task);
+        //        return null; // non-generic Task
+        //    }
+        //    return result;
+        //}
         /// <summary>Invoke a delegate that may be synchronous, Task, or Task&lt;T&gt;, returning its value.</summary>
-        static async Task<object?> InvokeMaybeAsync(Delegate handler, object?[] args, Type returnType)
+        static async Task<object?> InvokeMaybeAsync(ToolCall handler, object?[] args, Type returnType)
         {
-            var result = handler.DynamicInvoke(args);
+            var result = handler.MethodInfo.Invoke(handler.Instance, args);
             if (result is Task task)
             {
                 await task.ConfigureAwait(false);
@@ -659,35 +723,35 @@ namespace Gemineachy.Services
             SetToolSending(true);
             try
             {
-            for (int attempt = 1; attempt <= MaxSendAttempts; attempt++)
-            {
-                var tcs = new TaskCompletionSource<Task<string>>();
-                void onQuery(string query, Task<string> response) => tcs.TrySetResult(response);
-                OnQuery += onQuery;
-                try
+                for (int attempt = 1; attempt <= MaxSendAttempts; attempt++)
                 {
-                    await PrepareAndSendAsync(text, files, ct);
-                    if (await WaitForSendAcceptedAsync(ct))
+                    var tcs = new TaskCompletionSource<Task<string>>();
+                    void onQuery(string query, Task<string> response) => tcs.TrySetResult(response);
+                    OnQuery += onQuery;
+                    try
                     {
-                        // Accepted (compose box cleared). Await the model response.
-                        var response = await tcs.Task.WaitAsync(ct);
-                        return await response.WaitAsync(ct);
+                        await PrepareAndSendAsync(text, files, ct);
+                        if (await WaitForSendAcceptedAsync(ct))
+                        {
+                            // Accepted (compose box cleared). Await the model response.
+                            var response = await tcs.Task.WaitAsync(ct);
+                            return await response.WaitAsync(ct);
+                        }
+                        // Failure diagnostics (only on a failed send, so no spam): what did the compose box look
+                        // like, and does Gemini show an error toast?
+                        Console.WriteLine($"Gemineachy: send attempt {attempt}/{MaxSendAttempts} NOT accepted. composeText=\"{Trunc(CurrentComposeText())}\" errorToast=\"{DetectErrorText()}\"");
                     }
-                    // Failure diagnostics (only on a failed send, so no spam): what did the compose box look
-                    // like, and does Gemini show an error toast?
-                    Console.WriteLine($"Gemineachy: send attempt {attempt}/{MaxSendAttempts} NOT accepted. composeText=\"{Trunc(CurrentComposeText())}\" errorToast=\"{DetectErrorText()}\"");
+                    finally
+                    {
+                        OnQuery -= onQuery;
+                    }
+                    if (attempt < MaxSendAttempts)
+                        await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct); // simple backoff
                 }
-                finally
-                {
-                    OnQuery -= onQuery;
-                }
-                if (attempt < MaxSendAttempts)
-                    await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct); // simple backoff
-            }
-            // Permanent failure: clear the stale text so it does not linger in the user's compose box.
-            Console.WriteLine($"Gemineachy: message not accepted after {MaxSendAttempts} attempts; clearing compose. errorToast=\"{DetectErrorText()}\"");
-            await ClearComposeAsync();
-            throw new GeminiSendException($"Gemini did not accept the message after {MaxSendAttempts} attempts.");
+                // Permanent failure: clear the stale text so it does not linger in the user's compose box.
+                Console.WriteLine($"Gemineachy: message not accepted after {MaxSendAttempts} attempts; clearing compose. errorToast=\"{DetectErrorText()}\"");
+                await ClearComposeAsync();
+                throw new GeminiSendException($"Gemini did not accept the message after {MaxSendAttempts} attempts.");
             }
             finally
             {

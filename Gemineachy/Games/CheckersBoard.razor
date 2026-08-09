@@ -106,17 +106,19 @@
         Game.OnStateChanged += HandleGameStateChanged;
         RefreshTargets();
 
-        // Contribute this game's tools to the central registry while the board is open.
-        _geminiChatService.RegisterTool<CheckersBoard>(Move,
-            "Make your (Black's) checkers move. Pass the move in PDN notation exactly as shown in the board's legal-move list: simple move like \"11-15\" or a jump/multi-jump like \"18x25\" / \"18x25x32\". Returns the updated board state (with the new legal-move list); if the move was illegal it says so - pick one from the listed legal moves.");
-        _geminiChatService.RegisterTool<CheckersBoard>(GetBoardState,
-            "Returns the current checkers board as text: piece layout, whose turn it is, and the legal moves in PDN notation.");
+        _geminiChatService.Register(this);
+
+        // // Contribute this game's tools to the central registry while the board is open.
+        // _geminiChatService.RegisterTool<CheckersBoard>(Move,
+        //     "Make your (Black's) checkers move. Pass the move in PDN notation exactly as shown in the board's legal-move list: simple move like \"11-15\" or a jump/multi-jump like \"18x25\" / \"18x25x32\". Returns the updated board state (with the new legal-move list); if the move was illegal it says so - pick one from the listed legal moves.");
+        // _geminiChatService.RegisterTool<CheckersBoard>(GetBoardState,
+        //     "Returns the current checkers board as text: piece layout, whose turn it is, and the legal moves in PDN notation.");
 
         // Announce the game, attach the board, and refresh the manifest so Gemini sees the new tools.
-        await _geminiChatService.Query(
-            $@"{ToolProtocol.GameMarker} {nameof(Gemineachy)} browser extension: The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.",
-            "checkers-board.txt", Game.GetBoardStateText());
-        await _geminiChatService.SendToolInfo();
+        // await _geminiChatService.Query(
+        //     $@"{ToolProtocol.GameMarker} {nameof(Gemineachy)} browser extension: The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.",
+        //     "checkers-board.txt", Game.GetBoardStateText());
+        await _geminiChatService.SendToolInfo("The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.");
     }
 
     // Fired by the engine on every state change (selection or applied move). This can fire from a
@@ -180,6 +182,7 @@
     }
 
     /// <summary>Tool: apply Black's move given in PDN notation ("11-15", "18x25", "18x25x32").</summary>
+    [AgentTool("Make your (Black's) checkers move. Pass the move in PDN notation exactly as shown in the board's legal-move list: simple move like \"11-15\" or a jump/multi-jump like \"18x25\" / \"18x25x32\". Returns the updated board state (with the new legal-move list); if the move was illegal it says so - pick one from the listed legal moves.")]
     string Move(string move)
     {
         if (string.IsNullOrWhiteSpace(move))
@@ -198,6 +201,7 @@
     }
 
     /// <summary>Tool: return the current board state text.</summary>
+    [AgentTool("Returns the current checkers board as text: piece layout, whose turn it is, and the legal moves in PDN notation.")]
     string GetBoardState() => Game.GetBoardStateText();
 
     public async ValueTask DisposeAsync()
@@ -205,8 +209,11 @@
         if (!_beenInit) return;
         _beenInit = false;
         Game.OnStateChanged -= HandleGameStateChanged;
-        _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(Move)}");
-        _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(GetBoardState)}");
-        await _geminiChatService.SendToolInfo();
+        // _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(Move)}");
+        // _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(GetBoardState)}");
+
+        _geminiChatService.Unregister(this);
+
+        await _geminiChatService.SendToolInfo("Checkers: User closed game.");
     }
 }

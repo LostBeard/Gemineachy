@@ -5,6 +5,38 @@ namespace Gemineachy.Services
 {
     public static class DelegateFormatter
     {
+        public static string GetCsharpSignature(MethodInfo method)
+        {
+            // Get the underlying MethodInfo of the target method or the Invoke method of the delegate type
+            if (method == null) return "unknown";
+
+            var sb = new StringBuilder();
+
+            // Return type
+            sb.Append(GetFriendlyTypeName(method.ReturnType));
+            sb.Append(" ");
+
+            // Method Name
+            sb.Append(method.Name);
+
+            // Parameters
+            sb.Append("(");
+            var parameters = method.GetParameters();
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                var p = parameters[i];
+                if (i > 0) sb.Append(", ");
+
+                // Handle modifiers like out / ref / in
+                if (p.IsOut) sb.Append("out ");
+                else if (p.ParameterType.IsByRef) sb.Append("ref ");
+
+                sb.Append($"{GetFriendlyTypeName(p.ParameterType.GetElementType() ?? p.ParameterType)} {p.Name}");
+            }
+            sb.Append(")");
+
+            return sb.ToString();
+        }
         public static string GetCsharpSignature(Delegate del)
         {
             // Get the underlying MethodInfo of the target method or the Invoke method of the delegate type

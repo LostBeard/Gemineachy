@@ -148,7 +148,7 @@ namespace Gemineachy.Services
         /// <summary>Build a single standard function-calling schema for a tool from its delegate signature.</summary>
         public static Dictionary<string, object?> BuildToolSchema(ToolCall tool)
         {
-            var method = tool.ToolHandler.Method;
+            var method = tool.MethodInfo;
             var properties = new Dictionary<string, object?>();
             var required = new List<string>();
             foreach (var p in method.GetParameters())

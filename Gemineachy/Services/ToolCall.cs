@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json.Serialization;
 
 namespace Gemineachy.Services
@@ -8,9 +9,22 @@ namespace Gemineachy.Services
     public class ToolCall
     {
         [JsonIgnore]
-        public Delegate ToolHandler { get; set; } = null!;
-        public string ToolName { get; set; } = "";
-        public string Signature { get; set; } = "";
-        public string Description { get; set; } = "";
+        public Type ToolType { get; }
+        [JsonIgnore]
+        public MethodInfo MethodInfo { get; }
+        [JsonIgnore]
+        public object? Instance { get; }
+        public string ToolName { get; } = "";
+        public string Signature { get; } = "";
+        public string Description { get; } = "";
+        public ToolCall(string name, Type type, MethodInfo methodInfo, object? instance, string description)
+        {
+            ToolName = name;
+            ToolType = type;
+            MethodInfo = methodInfo;
+            Instance = instance;
+            Description = description;
+            Signature = DelegateFormatter.GetCsharpSignature(methodInfo);
+        }
     }
 }
