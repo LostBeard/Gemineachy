@@ -1,0 +1,11 @@
+{
+  "background": {
+    "scripts": [ "app/background.js" ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "spawnjsbrowserextensiondemo@spawndev.com",
+      "strict_min_version": "42.0"
+    }
+  }
+}

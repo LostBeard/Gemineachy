@@ -1,0 +1,89 @@
+﻿@using Gemineachy.Services
+@using System.Text.RegularExpressions
+@inject GeminiChatService _geminiChatService
+@implements IDisposable
+<div>
+    <UiButton style="@(_extend ? "" : "opacity: 50%;")" OnClick="@(() => _extend = !_extend)">A</UiButton>
+    @if (_extend)
+    {
+        <UiButton OnClick="IntroduceTools">Introduce Tools</UiButton>
+        <UiButton OnClick="Hello">Hello!</UiButton>
+        <UiButton OnClick="ILikeCSharp">I Like CSharp</UiButton>
+    }
+    <UiDialog @bind-Open="_dialogOpen" Title="Hello from RazorUI">
+        This dialog is rendered by SpawnDomRenderer and styled by the adopted RazorUI sheet. Click the backdrop to close.
+    </UiDialog>
+</div>
+
+@code {
+
+    bool _extend = false;
+    bool _dialogOpen = false;
+    bool _beenInit = false;
+    protected override void OnInitialized()
+    {
+        base.OnInitialized();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        base.OnAfterRender(firstRender);
+        if (!_beenInit)
+        {
+            _beenInit = true;
+            _geminiChatService.OnQueryResponse += GeminiChatService_OnQueryResponse;
+        }
+    }
+    string _toolQueryKeyOut = "Gemineachy:Gemini ";
+    string _toolQueryKeyIn = "Gemini:Gemineachy ";
+
+    void GeminiChatService_OnQueryResponse(string query, string response)
+    {
+        var toolCalls = Regex.Matches(response, @"\[TOOL_REQUEST:?\s+(.*?)\]", RegexOptions.IgnoreCase);
+        foreach (Match m in toolCalls)
+        {
+            var tool = m.Groups[1].Value.Trim();
+            Console.WriteLine($"Tool call: " + tool);
+            switch (tool)
+            {
+                case "get_time":
+                    _ = _geminiChatService.Query($"[TOOL_RESPONSE: get_time] -> {DateTime.Now.ToString()}");
+                    break;
+            }
+        }
+    }
+
+    public class AgentTool
+    {
+        public Regex ToolPattern { get; set; }
+        public string Description { get; set; }
+        public Func<Match, Task> OnToolCall { get; set; }
+    }
+
+    async Task IntroduceTools()
+    {
+        var resp = await _geminiChatService.Query(@"
+Hello Gemini. This message is from Gemineachy browser extension. I am here to provide you with in browser tools you can use to help the user. For instance if the user asks you how long until noon, you can ask me the current time, and in turn you use my response to you to answer the user's question.
+To ask me the time simply respond to the user ""[TOOL_REQUEST: get_time]"" and I will respond with the time. For the moment that is my only tool. This is a work in progress. Enjoy your chat with the user.
+        ");
+    }
+    async Task Hello()
+    {
+        var resp = await _geminiChatService.Query("Hello!");
+        Console.WriteLine($"[RazorRendererDemo] hello response: {resp}");
+        resp = await _geminiChatService.Query("Do you like c#?");
+        Console.WriteLine($"[RazorRendererDemo] c# response: {resp}");
+    }
+    async Task ILikeCSharp()
+    {
+        await _geminiChatService.AttachTextFile("myfile.txt", "Hellow world!");
+    }
+    public void Dispose()
+    {
+        if (_beenInit)
+        {
+            _beenInit = false;
+            _geminiChatService.OnQueryResponse -= GeminiChatService_OnQueryResponse;
+        }
+    }
+}

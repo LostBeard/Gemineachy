@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<!-- Disable compression (optional, based on use case) -->
+		<CompressionEnabled>false</CompressionEnabled>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- Direct reference so this WASM app gets the SpawnJS.WebWorkers build targets that produce
+		     main.classic.js (the background service worker loads it via importScripts). -->
+		<PackageReference Include="SpawnDev.SpawnJS.WebWorkers" Version="1.0.7" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="1.1.12-local.2" />
+		<PackageReference Include="SpawnDev.SpawnJS.BrowserExtension" Version="1.0.1" />
+		<PackageReference Include="SpawnDev.SpawnJS.RazorUI" Version="1.0.3" />
+	</ItemGroup>
+
+</Project>

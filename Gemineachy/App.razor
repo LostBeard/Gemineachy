@@ -1,0 +1,71 @@
+﻿@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.WebWorkers
+@inject SpawnJSRuntime JS
+@inject WebWorkerService WebWorkerService
+@inject RazorUITheme ThemeService
+
+<div>
+    <h2>RazorUI</h2>
+
+    <UiCard Title="RazorUI">
+        A themeable component library rendered by SpawnDomRenderer, styled by a stylesheet adopted into this shadow root.
+        <UiStack Gap="0.6rem" style="margin-top:.75rem;">
+            <UiInput @bind-Value="_name" placeholder="Type here" />
+            <UiStack Horizontal="true" Gap="0.5rem">
+                <UiButton OnClick="IncrementCount" id="primary-btn" data-test="splat" class="demo-extra">Primary (@_count)</UiButton>
+                <UiButton Secondary="true" OnClick="ToggleTheme">Toggle theme</UiButton>
+                <UiButton Secondary="true" OnClick="@(() => _dialogOpen = true)">Open dialog</UiButton>
+            </UiStack>
+        </UiStack>
+    </UiCard>
+
+    <UiCard Title="Progress">
+        <UiStack Gap="0.9rem" style="margin-top:.5rem;">
+            <UiSlider @bind-Value="_progress" Min="0" Max="100" />
+            <UiProgressBar Value="_progress" ShowValue="true" />
+            <UiProgressBar Value="_progress" Striped="true" ShowValue="true" />
+            <UiProgressBar Indeterminate="true" />
+            <UiStack Horizontal="true" Gap="1.4rem" style="align-items:center; margin-top:.25rem;">
+                <UiProgressCircle Value="_progress" ShowValue="true" />
+                <UiProgressCircle Value="_progress" Size="96" StrokeWidth="10" ShowValue="true" />
+                <UiProgressCircle Indeterminate="true" />
+            </UiStack>
+        </UiStack>
+    </UiCard>
+
+    <UiCard Title="Media controls (preview)">
+        <UiStack Gap="0.6rem" style="margin-top:.5rem;">
+            <UiSlider @bind-Value="_progress" Min="0" Max="100" />
+            <UiStack Horizontal="true" Gap="0.15rem" style="align-items:center;">
+                <UiIconButton Icon="skip-previous" AriaLabel="Previous" />
+                <UiIconButton Icon="@(_playing ? "pause" : "play")" AriaLabel="Play/Pause" OnClick="@(() => _playing = !_playing)" />
+                <UiIconButton Icon="stop" AriaLabel="Stop" OnClick="@(() => _playing = false)" />
+                <UiIconButton Icon="skip-next" AriaLabel="Next" />
+                <UiIconButton Icon="@(_muted ? "volume-mute" : "volume")" AriaLabel="Mute" OnClick="@(() => _muted = !_muted)" />
+                <UiIconButton Icon="fullscreen" AriaLabel="Fullscreen" />
+            </UiStack>
+        </UiStack>
+    </UiCard>
+
+    <UiDialog @bind-Open="_dialogOpen" Title="Hello from RazorUI">
+        This dialog is rendered by SpawnDomRenderer and styled by the adopted RazorUI sheet. Click the backdrop to close.
+    </UiDialog>
+</div>
+
+@code {
+    int _count = 0;
+    string _name = "User first name maybe";
+    double _progress = 42;
+    bool _dialogOpen;
+    bool _dark;
+    bool _playing;
+    bool _muted;
+
+    void IncrementCount() => _count++;
+    void ToggleTheme()
+    {
+        _dark = !_dark;
+        // Live theme swap - restyles every root the shared theme sheet was adopted into, no re-render.
+        ThemeService.SetTheme(_dark ? RazorUITheme.Dark : RazorUITheme.Light);
+    }
+}
