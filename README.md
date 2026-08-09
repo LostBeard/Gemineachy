@@ -15,4 +15,4 @@ A .Net Wasm browser extension that adds tools, games, and more to Gemini chat.
 ## Screenshots
 
 ### Checkers with Gemini
-![Checkers with Gemini](https://github.com/LostBeard/Gemineachy/blob/master/Gemineachy/wwwroot/screenshots/checkers-with-gemini-2.jpg?raw=true)
+[![Checkers with Gemini](https://github.com/LostBeard/Gemineachy/blob/master/Gemineachy/wwwroot/screenshots/checkers-with-gemini-2.jpg?raw=true)](https://github.com/LostBeard/Gemineachy/blob/master/Gemineachy/wwwroot/screenshots/checkers-with-gemini-2.jpg?raw=true)
