@@ -642,8 +642,9 @@ namespace Gemineachy.Services
 
         /// <summary>Max times to (re)click Send when Gemini doesn't accept a message (e.g. transient errors).</summary>
         public int MaxSendAttempts { get; set; } = 3;
-        /// <summary>How long to wait for the compose box to clear (= send accepted) before treating a send as failed.</summary>
-        public double SendAcceptTimeoutMs { get; set; } = 8000;
+        /// <summary>How long to wait for the compose box to clear (= send accepted) before treating a send as
+        /// failed and retrying. Kept short so a silently-dropped click retries quickly instead of stalling.</summary>
+        public double SendAcceptTimeoutMs { get; set; } = 4000;
 
         /// <summary>
         /// Send the message and await Gemini's response, verifying the send was ACCEPTED (Gemini clears
@@ -705,6 +706,11 @@ namespace Gemineachy.Services
             var fileList = files?.ToList();
             var hasFiles = fileList is { Count: > 0 };
 
+            // Ensure Gemini is idle before THIS attempt. The most common "send not accepted (no error)"
+            // cause is clicking Send while Gemini is still finishing the previous turn, so the click is a
+            // no-op. Waiting per-attempt (not just once in Query) makes retries wait for readiness too.
+            await WhileBusy.WaitAsync(ct);
+
             using var inputElement = QuerySelector<HTMLDivElement>(TextInputSelector);
             ArgumentNullException.ThrowIfNull(inputElement);
 
@@ -720,7 +726,6 @@ namespace Gemineachy.Services
                     Data = text
                 });
                 inputElement.DispatchEvent(inputEvent);
-                await Task.Delay(1);
             }
 
             // (Re)attach only when NOTHING is attached: initial send, or a retry after a failed send
@@ -731,8 +736,15 @@ namespace Gemineachy.Services
                 await AttachFiles(fileList!);
             }
 
-            using var sendButton = await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector, ct);
-            sendButton.Click();
+            // Deterministic ready signal (verified via CDP against live Gemini): the Send button only
+            // exists once the compose box has content, and it appears already enabled - so "present" ==
+            // "clickable" (no separate disabled state, no timer needed). Wait for it to appear, then
+            // re-grab it fresh immediately before clicking: Angular re-renders the compose after a turn,
+            // and a button reference resolved a moment earlier can be detached, making Click() a silent
+            // no-op. A missed click is still caught by the accept-timeout + retry.
+            await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector, ct);
+            using var sendButton = QuerySelector<HTMLButtonElement>(SendButtonSelector);
+            sendButton?.Click();
         }
 
         /// <summary>Send is accepted when Gemini clears the compose box; times out (=> failed) otherwise.</summary>

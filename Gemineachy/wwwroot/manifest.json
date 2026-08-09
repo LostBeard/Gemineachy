@@ -22,7 +22,7 @@
         "https://gemini.google.com/*"
       ],
       "js": [ "app/content.js" ],
-      "all_frames": true
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
