@@ -1,15 +1,13 @@
 # Gemineachy
-A .Net Wasm browser extension that adds tools, games, and more to Gemini chat. 
+A .Net Wasm browser extension that adds tools, games, and eventually full Reachy Mini integration to Gemini web browser chat. 
 
 ## Current Features
-- Checkers
-- Async query Gemini with optional File attachments working.
-- Testing making in browser tools available to agent to extend abilities.
+- Checkers with Gemini
 
-## Possible features to come
+## Features to come
 - Reachy Mini control 
 - Animated agent avatar(s)
-- Local LLM and ML access via tools to extend abilities
+- Local LLM and ML tools via [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML)
 - Multi-agent gaming and collaboration
 
 ## Screenshots
