@@ -87,7 +87,7 @@ namespace Gemineachy.Services
                     // starts only once every IAsyncBackgroundService.Ready has completed, so blocking
                     // Ready on a Gemini round-trip here would stall the whole UI. Instead we hook the
                     // renderer's first after-render and send it then (non-blocking).
-                    Renderer.OnAfterRenderAsync += OnRendererAfterRenderAsync;
+                    //Renderer.OnAfterRenderAsync += OnRendererAfterRenderAsync;
                 }
             }
         }
