@@ -1,0 +1,45 @@
+.start-menu {
+    position: fixed;
+    top: 56px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100000;
+    width: 340px;
+    max-height: 62vh;
+    overflow-y: auto;
+    padding: 8px;
+    background: #1e1e24;
+    border: 1px solid #3a3a44;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    color: #eee;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.start-menu-header {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #888;
+    padding: 6px 8px;
+}
+
+.start-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #eee;
+    text-align: left;
+    padding: 8px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.start-menu-item:hover { background: #3a3a44; }
+.start-menu-item-icon { display: flex; }
+.start-menu-item-text { display: flex; flex-direction: column; }
+.start-menu-item-name { font-weight: 600; }
+.start-menu-item-desc { font-size: 0.8rem; color: #aaa; }

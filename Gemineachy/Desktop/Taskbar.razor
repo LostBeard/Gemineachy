@@ -1,0 +1,74 @@
+@using Gemineachy.Services
+@inject AppManager AppManager
+@inject GeminiChatService Gemini
+@implements IDisposable
+
+<div class="taskbar">
+    <button class="tb-start @(_startOpen ? "active" : "")" @onclick="ToggleStart" title="Apps">▦</button>
+
+    @if (_pinned.Any())
+    {
+        <div class="tb-group tb-pinned">
+            @foreach (var app in _pinned)
+            {
+                <button class="tb-app @(IsRunning(app) ? "running" : "")" title="@app.Name"
+                        @onclick="() => AppManager.Launch(app)">
+                    <AppIcon Icon="@app.Icon" Alt="@app.Name" />
+                </button>
+            }
+        </div>
+    }
+
+    @if (AppManager.Windows.Any())
+    {
+        <div class="tb-divider"></div>
+        <div class="tb-group tb-windows">
+            @foreach (var w in AppManager.Windows)
+            {
+                <button class="tb-win @(AppManager.FocusedId == w.Id && !w.Minimized ? "active" : "") @(w.Minimized ? "minimized" : "")"
+                        title="@w.Title" @onclick="() => AppManager.ToggleMinimize(w.Id)">
+                    <AppIcon Icon="@w.Icon" Alt="@w.Title" />
+                    <span class="tb-win-title">@w.Title</span>
+                </button>
+            }
+        </div>
+    }
+
+    <div class="tb-spacer"></div>
+    <div class="tb-group tb-tray">
+        <button class="tb-tray-btn @(Gemini.ShowToolTraffic ? "active" : "")"
+                title="@(Gemini.ShowToolTraffic ? "Hide tool calls" : "Show tool calls")"
+                @onclick="ToggleToolTraffic">🛠</button>
+    </div>
+</div>
+
+@if (_startOpen)
+{
+    <StartMenu OnLaunched="CloseStart" />
+}
+
+@code {
+    private bool _startOpen;
+    private bool _hooked;
+    private IEnumerable<RegisteredApp> _pinned => AppManager.PinnedApps;
+
+    protected override void OnInitialized()
+    {
+        // Refresh directly on any window-manager change (launch/close/minimize/focus), rather than
+        // depending on the parent re-render cascade.
+        AppManager.OnChanged += OnManagerChanged;
+        _hooked = true;
+    }
+
+    private void OnManagerChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private void ToggleStart() => _startOpen = !_startOpen;
+    private void CloseStart() => _startOpen = false;
+    private bool IsRunning(RegisteredApp app) => AppManager.Windows.Any(w => w.App == app);
+    private void ToggleToolTraffic() => Gemini.ShowToolTraffic = !Gemini.ShowToolTraffic;
+
+    public void Dispose()
+    {
+        if (_hooked) AppManager.OnChanged -= OnManagerChanged;
+    }
+}

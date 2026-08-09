@@ -1,0 +1,43 @@
+.settings-app {
+    width: 360px;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.settings-section { display: flex; flex-direction: column; gap: 10px; }
+.settings-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #888;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.setting-label { font-size: 0.9rem; }
+
+.setting-toggle,
+.setting-btn {
+    background: #3a3a44;
+    color: #eee;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 14px;
+    cursor: pointer;
+    min-width: 84px;
+}
+.setting-toggle.on { background: #7b61ff; }
+.setting-btn:disabled { opacity: 0.6; cursor: default; }
+
+.settings-footer {
+    font-size: 0.72rem;
+    color: #666;
+    text-align: center;
+}

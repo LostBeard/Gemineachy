@@ -1,0 +1,45 @@
+@using SpawnDev.SpawnJS
+@inject SpawnJSRuntime JS
+
+@if (_isImage)
+{
+    <img class="app-icon" src="@_src" alt="@Alt" draggable="false" />
+}
+else
+{
+    <span class="app-icon app-icon-glyph">@Icon</span>
+}
+
+@code {
+    [Parameter] public string Icon { get; set; } = "";
+    [Parameter] public string Alt { get; set; } = "";
+
+    private bool _isImage;
+    private string _src = "";
+
+    protected override void OnParametersSet()
+    {
+        var i = (Icon ?? "").Trim();
+        _isImage = i.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                   || i.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                   || i.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                   || i.Contains('/')
+                   || HasImageExtension(i);
+        if (_isImage)
+        {
+            // Absolute/data URIs pass through; relative paths resolve against the extension origin so
+            // packaged icons work inside the shadow root under CSP.
+            _src = (i.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                    || i.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                ? i
+                : new Uri(new Uri(JS.AppBaseUri), i).ToString();
+        }
+    }
+
+    private static bool HasImageExtension(string s)
+    {
+        foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".avif" })
+            if (s.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+}

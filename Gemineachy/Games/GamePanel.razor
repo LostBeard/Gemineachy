@@ -1,0 +1,126 @@
+@using Microsoft.AspNetCore.Components.Web
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
+@using SpawnDev.SpawnJS.RazorRenderer
+@inject SpawnDomRenderer Renderer
+@inject SpawnJSRuntime JS
+@implements IDisposable
+
+@* Non-modal, draggable floating panel for hosting a game (or any tool UI) so it stays out of the way
+   of the Gemini chat. Drag by the header. Reusable across games (checkers, chess, ...).
+
+   Drag performance: routing every mousemove through Blazor (arg alloc + Dispatcher marshal + IHandleEvent
+   + re-render) floods the single WASM thread and is laggy. Instead, on mousedown we attach a NATIVE
+   `pointermove` listener via SpawnJS and move the panel with a GPU `transform` (one style write per move,
+   no layout, no Blazor render). On pointerup we bake the final position into left/top and commit to state. *@
+
+<div class="game-panel" style="@PanelStyle" @ref="_panelRef">
+    <div class="game-panel-header" @onmousedown="StartDrag">
+        <span class="game-panel-title">@Title</span>
+        <button class="game-panel-close" @onclick="Close" @onmousedown:stopPropagation="true" title="Close">✕</button>
+    </div>
+    <div class="game-panel-body">
+        @ChildContent
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private ElementReference _panelRef;
+    private bool _positioned;              // once dragged, PanelStyle uses committed left/top
+    private double _x, _y;                 // committed panel top-left (viewport coords)
+    private double _anchorX, _anchorY;     // panel top-left at drag start
+    private double _startClientX, _startClientY;
+
+    private HTMLElement? _panelEl;
+    private CSSStyleDeclaration? _panelStyle;
+    private Document? _doc;
+    private Callback? _moveCb;
+    private Callback? _upCb;
+
+    private string PanelStyle => _positioned
+        ? $"left:{_x}px; top:{_y}px; right:auto;"
+        : "right:1.5rem; top:5rem;";
+
+    private void StartDrag(MouseEventArgs e)
+    {
+        _panelEl = Renderer.GetElement<HTMLElement>(_panelRef);
+        if (_panelEl == null) return;
+        _panelStyle = _panelEl.Style;
+
+        // Anchor to the panel's actual on-screen box (works at the CSS default or a previous position).
+        using (var rect = _panelEl.GetBoundingClientRect())
+        {
+            _anchorX = rect.X;
+            _anchorY = rect.Y;
+        }
+        _startClientX = e.ClientX;
+        _startClientY = e.ClientY;
+        // Pin via left/top so the transform below is a pure delta, and hint the compositor.
+        _panelStyle.SetProperty("left", $"{_anchorX}px");
+        _panelStyle.SetProperty("top", $"{_anchorY}px");
+        _panelStyle.SetProperty("right", "auto");
+        _panelStyle.SetProperty("will-change", "transform");
+
+        // Native listeners on document -> no Blazor event pipeline per move, and we keep tracking even
+        // when the cursor outruns the panel.
+        _doc = JS.GetDocument();
+        _moveCb = Callback.Create((Action<PointerEvent>)OnPointerMove);
+        _upCb = Callback.Create((Action<PointerEvent>)OnPointerUp);
+        _doc!.AddEventListener("pointermove", _moveCb);
+        _doc!.AddEventListener("pointerup", _upCb);
+    }
+
+    private void OnPointerMove(PointerEvent ev)
+    {
+        var dx = ev.ClientX - _startClientX;
+        var dy = ev.ClientY - _startClientY;
+        _x = _anchorX + dx;
+        _y = _anchorY + dy;
+        // Single GPU-composited write - no layout, no render.
+        _panelStyle?.SetProperty("transform", $"translate3d({dx}px,{dy}px,0)");
+        ev.Dispose();
+    }
+
+    private void OnPointerUp(PointerEvent ev)
+    {
+        ev.Dispose();
+        DetachDrag();
+        // Bake the transform into left/top so it survives the next Blazor render, then commit to state.
+        if (_panelStyle != null)
+        {
+            _panelStyle.SetProperty("transform", "none");
+            _panelStyle.RemoveProperty("will-change");
+            _panelStyle.SetProperty("left", $"{_x}px");
+            _panelStyle.SetProperty("top", $"{_y}px");
+        }
+        _positioned = true;
+        _panelStyle?.Dispose(); _panelStyle = null;
+        _panelEl?.Dispose(); _panelEl = null;
+        // Persist position into PanelStyle for future renders. Native callback is off the Dispatcher.
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void DetachDrag()
+    {
+        if (_doc != null)
+        {
+            if (_moveCb != null) _doc.RemoveEventListener("pointermove", _moveCb);
+            if (_upCb != null) _doc.RemoveEventListener("pointerup", _upCb);
+        }
+        _moveCb?.Dispose(); _moveCb = null;
+        _upCb?.Dispose(); _upCb = null;
+    }
+
+    private async Task Close() => await OnClose.InvokeAsync();
+
+    public void Dispose()
+    {
+        DetachDrag();
+        _panelStyle?.Dispose();
+        _panelEl?.Dispose();
+    }
+}

@@ -1,0 +1,28 @@
+@inject AppManager AppManager
+
+<div class="start-menu">
+    <div class="start-menu-header">Apps</div>
+    @foreach (var app in AppManager.ListedApps)
+    {
+        <button class="start-menu-item" @onclick="() => Launch(app)">
+            <span class="start-menu-item-icon"><AppIcon Icon="@app.Icon" Alt="@app.Name" /></span>
+            <span class="start-menu-item-text">
+                <span class="start-menu-item-name">@app.Name</span>
+                @if (!string.IsNullOrEmpty(app.Description))
+                {
+                    <span class="start-menu-item-desc">@app.Description</span>
+                }
+            </span>
+        </button>
+    }
+</div>
+
+@code {
+    [Parameter] public EventCallback OnLaunched { get; set; }
+
+    private void Launch(RegisteredApp app)
+    {
+        AppManager.Launch(app);
+        _ = OnLaunched.InvokeAsync();
+    }
+}

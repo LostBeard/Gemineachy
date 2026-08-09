@@ -1,0 +1,60 @@
+.taskbar {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100001;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    max-width: 92vw;
+    background: rgba(30, 30, 36, 0.96);
+    border: 1px solid #3a3a44;
+    border-radius: 12px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    color: #eee;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    user-select: none;
+}
+
+.tb-start,
+.tb-app,
+.tb-win,
+.tb-tray-btn {
+    background: transparent;
+    border: none;
+    color: #ddd;
+    cursor: pointer;
+    border-radius: 8px;
+    padding: 6px 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.95rem;
+}
+
+.tb-start { font-size: 1.1rem; }
+.tb-start.active,
+.tb-start:hover,
+.tb-app:hover,
+.tb-win:hover,
+.tb-tray-btn:hover { background: #3a3a44; }
+
+.tb-group { display: flex; align-items: center; gap: 4px; }
+
+.tb-app.running { box-shadow: inset 0 -2px 0 #7b61ff; }
+
+.tb-win.active { background: #3a3a44; }
+.tb-win.minimized { opacity: 0.55; }
+.tb-win-title {
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.85rem;
+}
+
+.tb-divider { width: 1px; height: 24px; background: #3a3a44; margin: 0 2px; }
+.tb-spacer { flex: 1; min-width: 4px; }
+.tb-tray-btn.active { color: #9c86ff; }

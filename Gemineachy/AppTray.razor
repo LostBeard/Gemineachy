@@ -13,59 +13,37 @@
         <UiButton OnClick="TestAsyncQueryResponse">Test Queries</UiButton>
         <UiButton OnClick="TestFileAttachment">Test Files</UiButton>
         <UiButton OnClick="@(()=> _checkers = !_checkers)">Play Checkers</UiButton>
+        <UiButton style="@(_geminiChatService.ShowToolTraffic ? "" : "opacity: 50%;")"
+                   OnClick="@(() => _geminiChatService.ShowToolTraffic = !_geminiChatService.ShowToolTraffic)">
+            @(_geminiChatService.ShowToolTraffic ? "Hide tool calls" : "Show tool calls")
+        </UiButton>
     }
     <UiDialog @bind-Open="_dialogOpen" Title="Hello from RazorUI">
         This dialog is rendered by SpawnDomRenderer and styled by the adopted RazorUI sheet. Click the backdrop to close.
     </UiDialog>
-    <UiDialog @bind-Open="_checkers" Title="Checkers">
-        <CheckersBoard />
-    </UiDialog>
 </div>
+@* Non-modal floating game panel - keeps the Gemini chat accessible while playing. Drag by the header. *@
+@if (_checkers)
+{
+    <GamePanel Title="Checkers" OnClose="@(() => _checkers = false)">
+        <CheckersBoard />
+    </GamePanel>
+}
 
 @code {
 
     bool _extend = false;
     bool _dialogOpen = false;
     bool _checkers = false;
-    bool _beenInit = false;
-    protected override void OnAfterRender(bool firstRender)
-    {
-        base.OnAfterRender(firstRender);
-        if (!_beenInit)
-        {
-            _beenInit = true;
-            _geminiChatService.OnQueryResponse += GeminiChatService_OnQueryResponse;
-        }
-    }
-    /// <summary>
-    /// Simply tool call listener<br/>
-    /// Checks for tool calls in the agent's response
-    /// </summary>
-    void GeminiChatService_OnQueryResponse(string query, string response)
-    {
-        var toolCalls = Regex.Matches(response, @"\[TOOL_REQUEST:?\s+(.*?)\]", RegexOptions.IgnoreCase);
-        foreach (Match m in toolCalls)
-        {
-            var tool = m.Groups[1].Value.Trim();
-            Console.WriteLine($"Tool call: " + tool);
-            switch (tool)
-            {
-                case "get_time":
-                    _ = _geminiChatService.Query($"[TOOL_RESPONSE: get_time] -> {DateTime.Now.ToString()}");
-                    break;
-            }
-        }
-    }
-    /// <summary>
-    /// Tells the agent how to use the available tools
-    /// </summary>
-    /// <returns></returns>
+
+    // Tool dispatch is centralized in GeminiChatService (parse + invoke + reply). Components no
+    // longer parse responses themselves - they contribute tools to the registry. See CheckersBoard
+    // for the register-on-mount / unregister-on-unmount pattern.
+
+    /// <summary>Re-send the full tool manifest to Gemini (protocol instructions + tool schemas).</summary>
     async Task IntroduceTools()
     {
-        await _geminiChatService.Query(@"
-Hello Gemini. This message is from Gemineachy browser extension. I am here to provide you with in browser tools you can use to help the user. For instance if the user asks you how long until noon, you can ask me the current time, and in turn you use my response to you to answer the user's question.
-To ask me the time simply respond to the user ""[TOOL_REQUEST: get_time]"" and I will respond with the time. For the moment that is my only tool. This is a work in progress. Enjoy your chat with the user.
-        ");
+        await _geminiChatService.SendToolInfo();
     }
     /// <summary>
     /// Send agent queries and wait for the response
@@ -94,10 +72,5 @@ To ask me the time simply respond to the user ""[TOOL_REQUEST: get_time]"" and I
     }
     public void Dispose()
     {
-        if (_beenInit)
-        {
-            _beenInit = false;
-            _geminiChatService.OnQueryResponse -= GeminiChatService_OnQueryResponse;
-        }
     }
 }

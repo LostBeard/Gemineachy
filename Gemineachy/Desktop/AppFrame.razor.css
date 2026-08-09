@@ -1,0 +1,60 @@
+.app-frame {
+    position: fixed;
+    min-width: 300px;
+    max-width: 92vw;
+    background: #1e1e24;
+    color: #eee;
+    border: 1px solid #3a3a44;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.app-frame.focused {
+    border-color: #7b61ff;
+    box-shadow: 0 16px 52px rgba(0, 0, 0, 0.62);
+}
+
+.app-frame-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    background: linear-gradient(180deg, #2b2b34, #23232b);
+    border-bottom: 1px solid #3a3a44;
+    cursor: grab;
+    user-select: none;
+}
+.app-frame-titlebar:active { cursor: grabbing; }
+
+.app-frame-icon { display: flex; align-items: center; }
+.app-frame-title {
+    flex: 1;
+    font-weight: 600;
+    font-size: 0.95rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-frame-buttons { display: flex; gap: 2px; }
+.app-frame-btn {
+    background: transparent;
+    border: none;
+    color: #bbb;
+    cursor: pointer;
+    width: 28px;
+    height: 24px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    line-height: 1;
+}
+.app-frame-btn:hover { background: #3a3a44; color: #fff; }
+.app-frame-btn.close:hover { background: #c0392b; color: #fff; }
+
+.app-frame-body {
+    padding: 14px;
+    max-height: 82vh;
+    overflow: auto;
+}

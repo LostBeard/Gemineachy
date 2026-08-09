@@ -1,0 +1,11 @@
+.app-icon {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+}
+
+img.app-icon { object-fit: contain; }
+.app-icon-glyph { font-size: 18px; line-height: 1; }

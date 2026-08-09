@@ -4,12 +4,46 @@
     align-items: center;
     font-family: sans-serif;
     gap: 15px;
+    /* Pin to the board width (8 * 60px) so changing status text never resizes the panel. */
+    width: 480px;
+    box-sizing: content-box;
 }
 
 .status-banner {
-    font-size: 1.2rem;
+    font-size: 1.05rem;
     font-weight: bold;
-    color: #333;
+    color: #eee;
+    text-align: center;
+    /* Fixed box so short/long status text (and wrapping) never changes the panel size. */
+    width: 100%;
+    height: 2.6em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1.25;
+    overflow: hidden;
+}
+
+.status-banner.game-over {
+    color: #ffd54f;
+    font-size: 1.3rem;
+}
+
+.thinking {
+    color: #9c86ff;
+    font-weight: normal;
+    font-style: italic;
+}
+
+.checkers-footer {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.hint {
+    color: #bbb;
+    font-size: 0.85rem;
 }
 
 .board-grid {
@@ -39,6 +73,22 @@
 
 .square.selected {
     background-color: #7b61ff !important;
+}
+
+/* Legal-destination highlight for the selected piece */
+.square.target {
+    box-shadow: inset 0 0 0 3px rgba(123, 97, 255, 0.9);
+}
+
+.move-hint {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background-color: rgba(123, 97, 255, 0.55);
+}
+
+.square.target:hover {
+    background-color: #9c86ff !important;
 }
 
 .piece {

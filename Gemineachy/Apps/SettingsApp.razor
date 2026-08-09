@@ -1,0 +1,38 @@
+@using Gemineachy.Desktop
+@using Gemineachy.Services
+@attribute [App(Name = "Settings", Icon = "⚙️", Pinned = true, SingleInstance = true, Description = "Configure the Gemineachy extension")]
+@inherits AppBase
+@inject GeminiChatService Gemini
+
+<div class="settings-app">
+    <div class="settings-section">
+        <div class="settings-title">Tool traffic</div>
+        <div class="setting-row">
+            <span class="setting-label">Show tool calls &amp; responses in the chat</span>
+            <button class="setting-toggle @(Gemini.ShowToolTraffic ? "on" : "")" @onclick="ToggleToolTraffic">
+                @(Gemini.ShowToolTraffic ? "Visible" : "Hidden")
+            </button>
+        </div>
+        <div class="setting-row">
+            <span class="setting-label">Re-send the tool manifest to Gemini</span>
+            <button class="setting-btn" @onclick="ReintroduceTools" disabled="@_sending">
+                @(_sending ? "Sending…" : "Re-send")
+            </button>
+        </div>
+    </div>
+    <div class="settings-footer">Gemineachy · tools for Gemini</div>
+</div>
+
+@code {
+    private bool _sending;
+
+    private void ToggleToolTraffic() => Gemini.ShowToolTraffic = !Gemini.ShowToolTraffic;
+
+    private async Task ReintroduceTools()
+    {
+        if (_sending) return;
+        _sending = true;
+        try { await Gemini.SendToolInfo(); }
+        finally { _sending = false; }
+    }
+}

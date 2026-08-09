@@ -8,7 +8,7 @@ namespace Gemineachy.Services
         public static string GetCsharpSignature(Delegate del)
         {
             // Get the underlying MethodInfo of the target method or the Invoke method of the delegate type
-            MethodInfo method = del.Method ?? del.GetType().GetMethod("Invoke");
+            MethodInfo? method = del.Method ?? del.GetType().GetMethod("Invoke");
             if (method == null) return "unknown";
 
             var sb = new StringBuilder();
@@ -39,7 +39,7 @@ namespace Gemineachy.Services
             return sb.ToString();
         }
 
-        private static string GetFriendlyTypeName(Type type)
+        public static string GetFriendlyTypeName(Type type)
         {
             if (type == typeof(void)) return "void";
             if (type == typeof(string)) return "string";

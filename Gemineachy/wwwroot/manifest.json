@@ -13,7 +13,8 @@
     "storage"
   ],
   "host_permissions": [
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "http://*.local/*"
   ],
   "content_scripts": [
     {

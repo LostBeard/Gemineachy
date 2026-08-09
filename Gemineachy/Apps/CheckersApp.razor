@@ -1,0 +1,7 @@
+@using Gemineachy.Desktop
+@using Gemineachy.Games
+@attribute [App(Name = "Checkers", Icon = "♛", Pinned = true, SingleInstance = true, Description = "Play checkers against Gemini")]
+@inherits AppBase
+
+@* Thin app shell around the checkers game. The board registers/unregisters its Gemini tools on mount/unmount. *@
+<CheckersBoard />

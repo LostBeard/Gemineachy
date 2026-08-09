@@ -1,0 +1,60 @@
+.game-panel {
+    position: fixed;
+    z-index: 65535;
+    min-width: 300px;
+    background: #1e1e24;
+    color: #eee;
+    border: 1px solid #3a3a44;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.game-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: linear-gradient(180deg, #2b2b34, #23232b);
+    border-bottom: 1px solid #3a3a44;
+    cursor: grab;
+    user-select: none;
+}
+
+.game-panel-header:active {
+    cursor: grabbing;
+}
+
+.game-panel-title {
+    font-weight: 600;
+    font-size: 1rem;
+}
+
+.game-panel-close {
+    background: transparent;
+    color: #bbb;
+    border: none;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.game-panel-close:hover {
+    background: #3a3a44;
+    color: #fff;
+}
+
+.game-panel-body {
+    padding: 14px;
+}
+
+/* Transparent full-viewport layer that keeps the drag tracking under the cursor. */
+.game-panel-draglayer {
+    position: fixed;
+    inset: 0;
+    z-index: 65534;
+    cursor: grabbing;
+}

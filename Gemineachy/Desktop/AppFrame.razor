@@ -1,0 +1,134 @@
+@using Microsoft.AspNetCore.Components.Web
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
+@using SpawnDev.SpawnJS.RazorRenderer
+@inject SpawnDomRenderer Renderer
+@inject SpawnJSRuntime JS
+@inject AppManager AppManager
+@implements IDisposable
+
+@* One app window: draggable titlebar (native pointer + GPU transform, same as GamePanel), focus/z-order,
+   minimize/close, and the app component hosted with a cascaded AppWindow. Minimized windows stay mounted
+   (display:none) so app state is preserved. *@
+
+<div class="app-frame @(_focused ? "focused" : "")" style="@FrameStyle" @ref="_frameRef" @onmousedown="FocusSelf">
+    <div class="app-frame-titlebar" @onmousedown="StartDrag">
+        <span class="app-frame-icon"><AppIcon Icon="@Window.Icon" Alt="@Window.Title" /></span>
+        <span class="app-frame-title">@Window.Title</span>
+        <span class="app-frame-buttons">
+            <button class="app-frame-btn min" title="Minimize"
+                    @onclick="Minimize" @onmousedown:stopPropagation="true">─</button>
+            <button class="app-frame-btn close" title="Close"
+                    @onclick="Close" @onmousedown:stopPropagation="true">✕</button>
+        </span>
+    </div>
+    <div class="app-frame-body">
+        <CascadingValue Value="Window" IsFixed="true">
+            @RenderApp
+        </CascadingValue>
+    </div>
+</div>
+
+@code {
+    [Parameter] public AppWindow Window { get; set; } = default!;
+
+    private bool _focused => AppManager.FocusedId == Window.Id;
+    private bool _hooked;
+
+    protected override void OnInitialized()
+    {
+        // Reflect manager changes (focus/minimize/z-order) directly, independent of the parent cascade.
+        AppManager.OnChanged += OnManagerChanged;
+        _hooked = true;
+    }
+
+    private void OnManagerChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private string FrameStyle =>
+        $"left:{Window.X}px; top:{Window.Y}px; z-index:{Window.ZIndex};" + (Window.Minimized ? " display:none;" : "");
+
+    private RenderFragment RenderApp => builder =>
+    {
+        builder.OpenComponent(0, Window.App.AppType);
+        builder.CloseComponent();
+    };
+
+    private void FocusSelf() => AppManager.Focus(Window.Id);
+    private void Minimize() => AppManager.Minimize(Window.Id);
+    private void Close() => AppManager.Close(Window.Id);
+
+    // ── drag (native pointer + GPU transform; see GamePanel for the rationale) ──
+    private ElementReference _frameRef;
+    private double _anchorX, _anchorY, _startClientX, _startClientY;
+    private HTMLElement? _frameEl;
+    private CSSStyleDeclaration? _frameStyle;
+    private Document? _doc;
+    private Callback? _moveCb;
+    private Callback? _upCb;
+
+    private void StartDrag(MouseEventArgs e)
+    {
+        AppManager.Focus(Window.Id);
+        _frameEl = Renderer.GetElement<HTMLElement>(_frameRef);
+        if (_frameEl == null) return;
+        _frameStyle = _frameEl.Style;
+        using (var rect = _frameEl.GetBoundingClientRect())
+        {
+            _anchorX = rect.X;
+            _anchorY = rect.Y;
+        }
+        _startClientX = e.ClientX;
+        _startClientY = e.ClientY;
+        _frameStyle.SetProperty("will-change", "transform");
+        _doc = JS.GetDocument();
+        _moveCb = Callback.Create((Action<PointerEvent>)OnPointerMove);
+        _upCb = Callback.Create((Action<PointerEvent>)OnPointerUp);
+        _doc!.AddEventListener("pointermove", _moveCb);
+        _doc!.AddEventListener("pointerup", _upCb);
+    }
+
+    private void OnPointerMove(PointerEvent ev)
+    {
+        var dx = ev.ClientX - _startClientX;
+        var dy = ev.ClientY - _startClientY;
+        Window.X = _anchorX + dx;
+        Window.Y = _anchorY + dy;
+        _frameStyle?.SetProperty("transform", $"translate3d({dx}px,{dy}px,0)");
+        ev.Dispose();
+    }
+
+    private void OnPointerUp(PointerEvent ev)
+    {
+        ev.Dispose();
+        DetachDrag();
+        if (_frameStyle != null)
+        {
+            _frameStyle.SetProperty("transform", "none");
+            _frameStyle.RemoveProperty("will-change");
+            _frameStyle.SetProperty("left", $"{Window.X}px");
+            _frameStyle.SetProperty("top", $"{Window.Y}px");
+        }
+        _frameStyle?.Dispose(); _frameStyle = null;
+        _frameEl?.Dispose(); _frameEl = null;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void DetachDrag()
+    {
+        if (_doc != null)
+        {
+            if (_moveCb != null) _doc.RemoveEventListener("pointermove", _moveCb);
+            if (_upCb != null) _doc.RemoveEventListener("pointerup", _upCb);
+        }
+        _moveCb?.Dispose(); _moveCb = null;
+        _upCb?.Dispose(); _upCb = null;
+    }
+
+    public void Dispose()
+    {
+        if (_hooked) AppManager.OnChanged -= OnManagerChanged;
+        DetachDrag();
+        _frameStyle?.Dispose();
+        _frameEl?.Dispose();
+    }
+}

@@ -1,13 +1,24 @@
-﻿@using Gemineachy.Games
+@using Gemineachy.Games
 @using Gemineachy.Services
-@using SpawnDev.SpawnJS.JSObjects
-@using System.Text.RegularExpressions
-@using File = SpawnDev.SpawnJS.JSObjects.File
+@using System.Linq
 @inject GeminiChatService _geminiChatService
 @implements IAsyncDisposable
 
 <div class="checkers-container">
-    <div class="status-banner">@Game.StatusMessage</div>
+    <div class="status-banner @(Game.IsGameOver ? "game-over" : "")">
+        @if (Game.IsGameOver)
+        {
+            <span>🏆 @Game.Winner wins!</span>
+        }
+        else
+        {
+            <span>@Game.StatusMessage</span>
+        }
+        @if (_thinking)
+        {
+            <span class="thinking"> · Gemini is thinking…</span>
+        }
+    </div>
     <div class="board-grid">
         @for (int r = 0; r < 8; r++)
         {
@@ -15,45 +26,69 @@
             @for (int c = 0; c < 8; c++)
             {
                 int col = c;
-                bool isDark = (row + col) % 2 == 1;
+                bool isDark = CheckersGame.IsDark(row, col);
                 bool isSelected = Game.SelectedSquare?.Row == row && Game.SelectedSquare?.Col == col;
+                bool isTarget = isDark && _targets.Contains(CheckersGame.ToSquare(row, col));
                 var piece = Game.Board[row, col];
 
-                <div class="@GetSquareClass(isDark, isSelected)" @onclick="() => SquareClicked(row, col)">
+                <div class="@GetSquareClass(isDark, isSelected, isTarget)" @onclick="() => SquareClicked(row, col)">
                     @if (piece != PieceType.None)
                     {
                         <div class="@GetPieceClass(piece)">
                             @(piece == PieceType.RedKing || piece == PieceType.BlackKing ? "♔" : "")
                         </div>
                     }
+                    else if (isTarget)
+                    {
+                        <div class="move-hint"></div>
+                    }
                 </div>
             }
         }
     </div>
-    <button class="reset-btn" @onclick="ResetGame">Reset Game</button>
+    <div class="checkers-footer">
+        <span class="hint">You are Red · Gemini is Black</span>
+        <button class="reset-btn" @onclick="ResetGame">New Game</button>
+    </div>
 </div>
 
 @code {
     private CheckersGame Game = new();
+    // Squares to highlight (movable pieces, or legal destinations for the selected piece).
+    private HashSet<int> _targets = new();
+    private bool _thinking;          // Gemini turn in flight
+    private bool _promptInFlight;    // guard against re-entrant prompts
+    private int _lastPromptedPly = -1;
+    private bool _announcedOver;
 
     private void SquareClicked(int row, int col)
     {
+        // The human only controls Red, and only when it is Red's turn and Gemini isn't moving.
+        if (Game.IsGameOver || Game.CurrentTurn != Player.Red || _thinking) return;
         Game.SelectSquare(row, col);
+        RefreshTargets();
         StateHasChanged();
     }
 
     private void ResetGame()
     {
         Game.InitializeBoard();
+        _lastPromptedPly = -1;
+        _announcedOver = false;
+        RefreshTargets();
         StateHasChanged();
     }
 
-    private string GetSquareClass(bool isDark, bool isSelected)
+    private void RefreshTargets() => _targets = Game.CurrentTurn == Player.Red && !Game.IsGameOver
+        ? Game.CurrentTargets().ToHashSet()
+        : new HashSet<int>();
+
+    private string GetSquareClass(bool isDark, bool isSelected, bool isTarget)
     {
-        string baseClass = "square ";
-        baseClass += isDark ? "dark-square" : "light-square";
-        if (isSelected) baseClass += " selected";
-        return baseClass;
+        string cls = "square " + (isDark ? "dark-square" : "light-square");
+        if (isSelected) cls += " selected";
+        if (isTarget) cls += " target";
+        return cls;
     }
 
     private string GetPieceClass(PieceType piece) => piece switch
@@ -66,47 +101,112 @@
     bool _beenInit = false;
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        base.OnAfterRender(firstRender);
-        if (!_beenInit)
-        {
-            _beenInit = true;
-            _geminiChatService.OnQueryResponse += GeminiChatService_OnQueryResponse;
-            var playerGoesFirst = true;
-            // At this point the game board has opened up
-            // We need to tell Gemini what is happening
-            // 
-            await _geminiChatService.Query($@"{nameof(Gemineachy)} browser extension says: The user has challenged Gemini to a game of checkers. The user will play on a visual checkboard and the game state and turn data will be relayed through chat to Gemini. Gemini is black and the player is red. Red will go first.", $"{nameof(CheckersGame)}-board.txt", Game.GetBoardStateText());
+        if (_beenInit) return;
+        _beenInit = true;
+        Game.OnStateChanged += HandleGameStateChanged;
+        RefreshTargets();
 
-        }
+        // Contribute this game's tools to the central registry while the board is open.
+        _geminiChatService.RegisterTool<CheckersBoard>(Move,
+            "Make your (Black's) checkers move. Pass the move in PDN notation exactly as shown in the board's legal-move list: simple move like \"11-15\" or a jump/multi-jump like \"18x25\" / \"18x25x32\". Returns the updated board state (with the new legal-move list); if the move was illegal it says so - pick one from the listed legal moves.");
+        _geminiChatService.RegisterTool<CheckersBoard>(GetBoardState,
+            "Returns the current checkers board as text: piece layout, whose turn it is, and the legal moves in PDN notation.");
+
+        // Announce the game, attach the board, and refresh the manifest so Gemini sees the new tools.
+        await _geminiChatService.Query(
+            $@"{ToolProtocol.GameMarker} {nameof(Gemineachy)} browser extension: The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.",
+            "checkers-board.txt", Game.GetBoardStateText());
+        await _geminiChatService.SendToolInfo();
     }
-    string _Gameplay = @"";
-    /// <summary>
-    /// Simply tool call listener<br/>
-    /// Checks for tool calls in the agent's response
-    /// </summary>
-    void GeminiChatService_OnQueryResponse(string query, string response)
+
+    // Fired by the engine on every state change (selection or applied move). This can fire from a
+    // non-Dispatcher thread (e.g. Gemini's move applies from the tool-dispatch continuation), so we
+    // MUST marshal onto the Blazor Dispatcher before touching component state / rendering. Wrapped in
+    // try/catch so a tool or Query failure can never bubble out of an async void and kill the runtime.
+    private void HandleGameStateChanged()
     {
-        var toolCalls = Regex.Matches(response, @"\[TOOL_REQUEST:?\s+(.*?)\]", RegexOptions.IgnoreCase);
-        foreach (Match m in toolCalls)
+        _ = InvokeAsync(async () =>
         {
-            var tool = m.Groups[1].Value.Trim();
-            Console.WriteLine($"Tool call: " + tool);
-            switch (tool)
+            try
             {
-                case "get_time":
-                    _ = _geminiChatService.Query($"[TOOL_RESPONSE: get_time] -> {DateTime.Now.ToString()}");
-                    break;
+                RefreshTargets();
+                StateHasChanged();
+                await DriveGeminiTurn();
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Checkers] state-change handler error: {ex}");
+            }
+        });
+    }
+
+    private async Task DriveGeminiTurn()
+    {
+        if (_promptInFlight) return;
+
+        if (Game.IsGameOver)
+        {
+            if (_announcedOver) return;
+            _announcedOver = true;
+            _promptInFlight = true;
+            try
+            {
+                await _geminiChatService.Query(
+                    $"{ToolProtocol.GameMarker} Checkers game over - {Game.Winner} wins. Feel free to say GG to the user.",
+                    "checkers-board.txt", Game.GetBoardStateText());
+            }
+            finally { _promptInFlight = false; }
+            return;
+        }
+
+        // Only prompt when it's Gemini's (Black's) turn, and only once per position.
+        if (Game.CurrentTurn != Player.Black || _lastPromptedPly == Game.Ply) return;
+        _lastPromptedPly = Game.Ply;
+        _promptInFlight = true;
+        _thinking = true;
+        StateHasChanged();
+        try
+        {
+            await _geminiChatService.Query(
+                $"{ToolProtocol.GameMarker} Checkers: it's your turn (Black). Make your move now with the CheckersBoard.Move tool using PDN notation from the legal-move list in the board below. Then reply with {ToolProtocol.HiddenResponseMarker} to keep the chat clean, unless the user has asked you to narrate.",
+                "checkers-board.txt", Game.GetBoardStateText());
+        }
+        finally
+        {
+            _promptInFlight = false;
+            _thinking = false;
+            StateHasChanged();
         }
     }
+
+    /// <summary>Tool: apply Black's move given in PDN notation ("11-15", "18x25", "18x25x32").</summary>
+    string Move(string move)
+    {
+        if (string.IsNullOrWhiteSpace(move))
+            return "No move provided. " + Game.GetBoardStateText();
+        var squares = new List<int>();
+        foreach (var part in move.Split(new[] { '-', 'x', 'X' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!int.TryParse(part.Trim(), out var sq) || sq < 1 || sq > 32)
+                return $"Could not parse move '{move}' - expected PDN square numbers like 11-15 or 18x25. " + Game.GetBoardStateText();
+            squares.Add(sq);
+        }
+        bool ok = squares.Count == 2 ? Game.TryMove(squares[0], squares[^1]) : Game.TryMovePath(squares);
+        // Move applied on the engine; the UI refresh happens via HandleGameStateChanged.
+        return (ok ? $"Move '{move}' accepted." : $"Illegal move '{move}'. Choose one from the legal moves listed below.")
+            + "\n" + Game.GetBoardStateText();
+    }
+
+    /// <summary>Tool: return the current board state text.</summary>
+    string GetBoardState() => Game.GetBoardStateText();
+
     public async ValueTask DisposeAsync()
     {
-        if (_beenInit)
-        {
-            _beenInit = false;
-            // tell Gemini the game has been closed and is now over
-
-            _geminiChatService.OnQueryResponse -= GeminiChatService_OnQueryResponse;
-        }
+        if (!_beenInit) return;
+        _beenInit = false;
+        Game.OnStateChanged -= HandleGameStateChanged;
+        _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(Move)}");
+        _geminiChatService.UnregisterTool($"{nameof(CheckersBoard)}.{nameof(GetBoardState)}");
+        await _geminiChatService.SendToolInfo();
     }
 }

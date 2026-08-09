@@ -1,0 +1,31 @@
+@inject AppManager AppManager
+@implements IDisposable
+
+@* Root of the windowed environment: the taskbar plus every open app window. Re-renders when the window
+   manager changes. @key preserves each window's AppFrame (and its live app component) across renders. *@
+
+<Taskbar />
+
+@foreach (var w in AppManager.Windows)
+{
+    <AppFrame Window="w" @key="w.Id" />
+}
+
+@code {
+    private bool _hooked;
+
+    protected override void OnInitialized()
+    {
+        AppManager.OnChanged += OnManagerChanged;
+        _hooked = true;
+    }
+
+    // AppManager changes can originate off the render Dispatcher (e.g. an app closing itself from a
+    // background callback), so marshal before re-rendering.
+    private void OnManagerChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        if (_hooked) AppManager.OnChanged -= OnManagerChanged;
+    }
+}

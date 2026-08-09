@@ -2,6 +2,8 @@
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.SpawnJS.Native;
+using SpawnDev.SpawnJS.RazorRenderer;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -11,15 +13,7 @@ using FileOptions = SpawnDev.SpawnJS.JSObjects.FileOptions;
 
 namespace Gemineachy.Services
 {
-    public class ToolCall
-    {
-        [JsonIgnore]
-        public Delegate ToolHandler { get; set; }
-        public string ToolName { get; set; }
-        public string Signature { get; set; }
-        public string Description { get; set; }
-    }
-    public class GeminiChatService(SpawnJSRuntime JS) : IAsyncBackgroundService
+    public class GeminiChatService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
     {
         const string FileAttachmentsSelector = "uploader-file-preview gem-attachment";
         const string TextInputSelector = "chat-window div[contenteditable=\"true\"]";
@@ -28,6 +22,13 @@ namespace Gemineachy.Services
         const string DictateButtonSelector = "chat-window button[aria-label*=\"Dictate\"]";
         const string SendButtonSelector = "chat-window button[aria-label*=\"Send\"]";
         const string StopButtonSelector = "chat-window button[aria-label*=\"Stop\"]";
+        // Marker attribute placed on tool-traffic chat elements (tool-call model responses and our
+        // injected tool-response/manifest user messages). Hidden by CSS unless ShowToolTraffic is on.
+        const string ToolTrafficAttr = "data-gemineachy-tool";
+        const string ShowToolsClass = "gemineachy-show-tools";
+        // While a tool send is in flight this class is on <html>; CSS collapses the compose box's inner
+        // text so our programmatic type+send doesn't flash/grow/shrink the box.
+        const string ToolSendingClass = "gemineachy-tool-sending";
         private Task? _ready = null;
         public Task Ready => _ready ??= InitAsync();
         /// <summary>
@@ -50,7 +51,8 @@ namespace Gemineachy.Services
         private TaskCompletionSource _busyTask = new TaskCompletionSource();
         private ActionCallback? _mutationCallback;
         private SemaphoreSlim _queryLock = new SemaphoreSlim(1);
-        public List<ToolCall> Tools = new List<ToolCall>();
+
+        public Dictionary<string, ToolCall> Tools = new Dictionary<string, ToolCall>();
         private async Task InitAsync()
         {
             Console.WriteLine($"GeminiChatService.InitAsync() {JS.GlobalScopeName} {JS.InstanceId}");
@@ -59,6 +61,8 @@ namespace Gemineachy.Services
                 _document = JS.GetDocument();
                 if (_document != null)
                 {
+                    // inject the CSS that hides tool-traffic chat elements (revealed by ShowToolTraffic)
+                    InjectToolTrafficStyle();
                     // ignore all existing messages
                     UpdateFromChat(true);
                     _mutationCallback = Callback.Create(Mutation_Observed);
@@ -73,17 +77,241 @@ namespace Gemineachy.Services
                             CharacterData = true
                         });
                     }
-                    Tools.Add(new ToolCall
-                    {
-                        ToolName = ((Delegate)Echo).Method.Name,
-                        ToolHandler = Echo,
-                        Signature = DelegateFormatter.GetCsharpSignature(Echo),
-                        Description = "Echoes message back out. Good minimal tools test."
-                    });
-                    await Task.Delay(5000);
-                    await SendToolInfo();
+                    // register tools this service provides
+                    RegisterTool(SendToolInfo, "Re-sends the full tool manifest to you. Call if you have lost track of the available tools.");
+                    RegisterTool(GetTypeInfo, "Returns the C#-like structure (public properties) of a .NET type used by a tool. Pass the type name shown in a tool's schema.");
+                    RegisterTool(GetTime, "Returns the user's current local date and time as a string.");
+                    RegisterTool(Echo, "Echoes the message back. Minimal connectivity test. Do not call this in a loop.");
+
+                    // Send the manifest AFTER the UI has rendered, not as part of Ready. The renderer
+                    // starts only once every IAsyncBackgroundService.Ready has completed, so blocking
+                    // Ready on a Gemini round-trip here would stall the whole UI. Instead we hook the
+                    // renderer's first after-render and send it then (non-blocking).
+                    Renderer.OnAfterRenderAsync += OnRendererAfterRenderAsync;
                 }
             }
+        }
+        private bool _toolInfoSent;
+        private async Task OnRendererAfterRenderAsync(bool firstRender)
+        {
+            if (!firstRender || _toolInfoSent) return;
+            _toolInfoSent = true;
+            try
+            {
+                await SendToolInfo();
+            }
+            catch (Exception ex)
+            {
+                // The very first send on a FRESH chat is the message that makes Gemini create the
+                // conversation and change the URL (/app -> /app/<id>). That SPA navigation swaps the
+                // chat DOM mid-flight, so our completion detection can miss the turn finishing and the
+                // Query times out. The manifest usually still reached Gemini; retry once now that the
+                // chat exists so the base tools are reliably registered. Never let this bubble into the
+                // renderer's exception handler (it is not a render fault).
+                Console.WriteLine($"Initial tool manifest send did not complete cleanly ({ex.GetType().Name}); retrying once after the chat settles.");
+                try
+                {
+                    await Task.Delay(1500);
+                    await SendToolInfo();
+                }
+                catch (Exception ex2)
+                {
+                    Console.WriteLine($"Tool manifest retry did not complete cleanly ({ex2.GetType().Name}). Use the \"Introduce Tools\" button to re-send if needed.");
+                }
+            }
+        }
+        private bool _showToolTraffic = false;
+        /// <summary>
+        /// When false (default), tool calls (Gemini's <c>«TOOL_CALL»</c> responses) and tool responses
+        /// (our injected [TOOL_RESULTS] / [TOOL_MANIFEST] messages) are hidden in the chat window.
+        /// Set true to reveal them ("Show tool calls" toggle).
+        /// </summary>
+        public bool ShowToolTraffic
+        {
+            get => _showToolTraffic;
+            set
+            {
+                if (_showToolTraffic == value) return;
+                _showToolTraffic = value;
+                ApplyShowToolTraffic();
+                OnStateChanged?.Invoke();
+            }
+        }
+        private void InjectToolTrafficStyle()
+        {
+            if (_document == null) return;
+            using var head = (Node?)_document.Head ?? _document.DocumentElement;
+            if (head == null) return;
+            using var style = new HTMLStyleElement();
+            // IMPORTANT: hide WITHOUT display:none. We mark tool-call responses while Gemini is still
+            // streaming into them; display:none removes the element from layout, and Gemini's frontend
+            // won't finalize the turn (Stop->Send) for an unlaid-out element - which stalls our
+            // completion detection until the user reveals it. Instead use the standard "visually hidden"
+            // (clip/off-screen) technique: the element stays rendered and measurable so Gemini finalizes
+            // normally, but it's visually gone with no gap. Scoped to :not(show) so the toggle simply
+            // stops matching and the element renders normally.
+            style.TextContent =
+                $"html:not(.{ShowToolsClass}) [{ToolTrafficAttr}]{{" +
+                "position:absolute !important;width:1px !important;height:1px !important;" +
+                "padding:0 !important;margin:-1px !important;overflow:hidden !important;" +
+                "clip:rect(0,0,0,0) !important;clip-path:inset(50%) !important;" +
+                "white-space:nowrap !important;border:0 !important;opacity:0 !important;" +
+                "pointer-events:none !important;}" +
+                // While a tool send is in flight, collapse the compose box's text to a single line and
+                // hide it, so filling it with our (hidden) message and clearing it doesn't flash/grow.
+                $"html.{ToolSendingClass} {TextInputSelector}{{" +
+                "max-height:1lh !important;overflow:hidden !important;opacity:0 !important;}}";
+            head.AppendChild(style);
+        }
+        private void ApplyShowToolTraffic()
+        {
+            if (_document == null) return;
+            using var html = _document.DocumentElement;
+            if (html == null) return;
+            using var classList = html.ClassList;
+            classList.Toggle(ShowToolsClass, _showToolTraffic);
+        }
+        /// <summary>Toggle the "tool send in flight" class so CSS collapses/hides the compose box text.</summary>
+        private void SetToolSending(bool sending)
+        {
+            if (_document == null) return;
+            using var html = _document.DocumentElement;
+            if (html == null) return;
+            using var classList = html.ClassList;
+            classList.Toggle(ToolSendingClass, sending);
+        }
+        /// <summary>
+        /// Hide tool-traffic chat elements the instant they appear/stream in - runs on EVERY mutation,
+        /// decoupled from the per-turn completion logic (so a tool call is hidden while it streams, not
+        /// only once Gemini finishes). Idempotent: the <c>:not([attr])</c> selectors skip already-marked
+        /// elements, and it uses TextContent (no layout reflow) to stay cheap under rapid streaming.
+        /// </summary>
+        private void EarlyHideToolTraffic()
+        {
+            if (_document == null) return;
+            // Our injected hidden user messages: tool results / manifest / game prompts.
+            var userQueries = _document
+                .QuerySelectorAll<HTMLElement>($"chat-window user-query:not([{ToolTrafficAttr}])")
+                .Using(o => o.ToArray());
+            foreach (var uq in userQueries)
+            {
+                using (uq)
+                {
+                    using var line = uq.QuerySelector<HTMLElement>("p.query-text-line");
+                    var text = line?.TextContent?.TrimStart() ?? "";
+                    if (text.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
+                        || text.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal)
+                        || text.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal))
+                    {
+                        uq.SetAttribute(ToolTrafficAttr, "");
+                    }
+                }
+            }
+            // Gemini responses that are tool-call blocks, or that the agent chose to hide with the
+            // «HIDDEN» marker - hidden the moment the marker streams in.
+            var modelResponses = _document
+                .QuerySelectorAll<HTMLElement>($"chat-window model-response:not([{ToolTrafficAttr}])")
+                .Using(o => o.ToArray());
+            foreach (var mr in modelResponses)
+            {
+                using (mr)
+                {
+                    var text = mr.TextContent ?? "";
+                    if (text.Contains(ToolProtocol.CallOpen, StringComparison.Ordinal)
+                        || text.Contains(ToolProtocol.HiddenResponseMarker, StringComparison.Ordinal))
+                        mr.SetAttribute(ToolTrafficAttr, "");
+                }
+            }
+        }
+        /// <summary>
+        /// This is presented as a tool to the agent so the agent can query the type structure to allow informed tool calling<br/>
+        /// Returns the type structure which will likely look like the C# code of the object type (with only public properties (non-JsonIOngore tagged))
+        /// </summary>
+        /// <param name="typeName"></param>
+        /// <returns></returns>
+        public string GetTypeInfo(string typeName)
+        {
+            if (string.IsNullOrWhiteSpace(typeName)) return "// error: typeName was empty";
+            var type = ResolveToolType(typeName);
+            if (type == null)
+                return $"// unknown type '{typeName}'. It must be a type used by a registered tool's parameters.";
+            return DescribeType(type);
+        }
+        /// <summary>Find a type by name among the parameter types (and their transitive property types)
+        /// of all registered tools. Keeps GetTypeInfo scoped to types the agent can actually reference.</summary>
+        private Type? ResolveToolType(string typeName)
+        {
+            var seen = new HashSet<Type>();
+            var queue = new Queue<Type>();
+            foreach (var t in Tools.Values)
+                foreach (var p in t.ToolHandler.Method.GetParameters())
+                    queue.Enqueue(p.ParameterType);
+            while (queue.Count > 0)
+            {
+                var raw = queue.Dequeue();
+                var t = Nullable.GetUnderlyingType(raw) ?? raw;
+                if (!seen.Add(t)) continue;
+                if (t.IsArray) { queue.Enqueue(t.GetElementType()!); continue; }
+                if (t.IsGenericType) { foreach (var g in t.GetGenericArguments()) queue.Enqueue(g); }
+                if (IsComplexType(t))
+                {
+                    if (string.Equals(t.Name, typeName, StringComparison.OrdinalIgnoreCase)) return t;
+                    foreach (var prop in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                        queue.Enqueue(prop.PropertyType);
+                }
+            }
+            return null;
+        }
+        private static bool IsComplexType(Type t) =>
+            t.IsClass && t != typeof(string) || (t.IsValueType && !t.IsPrimitive && !t.IsEnum && Nullable.GetUnderlyingType(t) == null && t != typeof(decimal) && t != typeof(DateTime) && t != typeof(Guid));
+        private static string DescribeType(Type type)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"public class {type.Name} {{");
+            foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (prop.GetCustomAttribute<JsonIgnoreAttribute>() != null) continue;
+                if (prop.GetIndexParameters().Length > 0) continue;
+                var desc = prop.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()?.Description;
+                if (!string.IsNullOrEmpty(desc)) sb.AppendLine($"    // {desc}");
+                sb.AppendLine($"    public {DelegateFormatter.GetFriendlyTypeName(prop.PropertyType)} {prop.Name} {{ get; set; }}");
+            }
+            sb.AppendLine("}");
+            return sb.ToString();
+        }
+        string GetTime() => DateTime.Now.ToString();
+        public bool UnregisterTool(string toolName)
+        {
+            return Tools.Remove(toolName);
+        }
+        public void RegisterTool(ToolCall tool)
+        {
+            // Idempotent: a component that remounts re-registers the same tool name without throwing.
+            Tools[tool.ToolName] = tool;
+        }
+        public void RegisterTool(Delegate fn, string description = "")
+        {
+            var typeName = fn.Target?.GetType().Name ?? fn.Method.ReflectedType?.Name ?? fn.Method.DeclaringType?.Name ?? "_";
+            var tool = new ToolCall
+            {
+                ToolName = $"{typeName}.{fn.Method.Name}",
+                ToolHandler = fn,
+                Signature = DelegateFormatter.GetCsharpSignature(fn),
+                Description = description
+            };
+            RegisterTool(tool);
+        }
+        public void RegisterTool<TType>(Delegate fn, string description = "")
+        {
+            var typeName = typeof(TType).Name;
+            var tool = new ToolCall
+            {
+                ToolName = $"{typeName}.{fn.Method.Name}",
+                ToolHandler = fn,
+                Signature = DelegateFormatter.GetCsharpSignature(fn),
+                Description = description
+            };
+            RegisterTool(tool);
         }
         async Task<string> Echo(string message)
         {
@@ -92,18 +320,16 @@ namespace Gemineachy.Services
         }
         public async Task SendToolInfo()
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("This file provides info on the tools the agent can call through the user-to-agent chat interface.");
-            sb.AppendLine($"Tools can be called by using JSON stringify on the arguments array for the tool call in the format of [\"TOOL_NAME_TO_CALL\", ...arguments].");
-            sb.AppendLine("For instance. To call the Echo tool: [TOOL_REQUEST [\"Echo\", \"This string will be echoed back.\"]]");
-            sb.AppendLine($"Multiple tool calls per message are allowed but only 1 tool call per line. And line breaks must be escaped in the json. 1 tool call takes 1 line.");
-            sb.AppendLine("The return values from the tool calls will be sent to the agent as a JSON stringified array in an attached file with the message [TOOL_RESPONSE]");
-            sb.AppendLine(JsonSerializer.Serialize(Tools));
-            var toolInfo = sb.ToString();
-            await Query($"{nameof(Gemineachy)}: Tool info", "tool-calling.txt", toolInfo);
+            var manifest = ToolProtocol.BuildManifest(Tools.Values);
+            // Protocol instructions live in the visible message; the full schema rides as an attachment
+            // so it does not clutter the chat. The manifest text is self-contained either way.
+            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest",
+                ToolProtocol.ManifestFileName, manifest);
         }
         private void Mutation_Observed()
         {
+            // Hide tool traffic first, on every mutation, so it never flashes visible while streaming.
+            EarlyHideToolTraffic();
             UpdateFromChat();
             OnDOMMutation?.Invoke();
         }
@@ -158,6 +384,12 @@ namespace Gemineachy.Services
                     if (!string.IsNullOrEmpty(query))
                     {
                         keepNode = true;
+                        // Loop-guard reset only (hiding is handled by EarlyHideToolTraffic on every
+                        // mutation). Plumbing (tool results/manifest) is part of an in-flight round and
+                        // must NOT reset the guard; game prompts and real user turns DO (fresh round).
+                        bool isPlumbing = query.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
+                                          || query.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal);
+                        if (!isPlumbing) ResetToolLoop();
                         var queryTCS = new TaskCompletionSource<string>();
                         OnQuery?.Invoke(query, queryTCS.Task);
                         void completionCheck()
@@ -165,9 +397,17 @@ namespace Gemineachy.Services
                             var isProcessing = IsProcessing();
                             if (isProcessing) return;
                             OnDOMMutation -= completionCheck;
-                            var lineElements = node.QuerySelectorAll<HTMLElement>("model-response [id*='model-response-message-content'] p").Using(o => o.ToArray());
-                            var modelResponseLines = lineElements.Select(l => l.TextContent?.Trim()).Where(t => !string.IsNullOrEmpty(t));
-                            var modelResponse = string.Join(" ", modelResponseLines);
+                            // Read the whole message body via TextContent, NOT innerText and NOT a join
+                            // of <p> elements. TextContent includes code blocks and, crucially, still
+                            // returns the text when the element is display:none - which it IS once
+                            // EarlyHideToolTraffic hides a tool-call response. innerText is layout-
+                            // dependent and returns "" for hidden elements, which silently blanked the
+                            // tool-call parse and stalled the game while tool calls were hidden. Our
+                            // delimiter-based parser («TOOL_CALL … ») does not need innerText's newlines.
+                            using var contentNode = node.QuerySelector<HTMLElement>("model-response [id*='model-response-message-content']");
+                            var modelResponse = contentNode?.TextContent?.Trim() ?? "";
+                            // (Hiding of tool-call responses happens in EarlyHideToolTraffic on every
+                            // mutation, so the block is hidden while streaming - not only once complete.)
                             // handle tool calling
                             _ = HandleAgentMessage(modelResponse);
                             //
@@ -187,29 +427,83 @@ namespace Gemineachy.Services
                 OnStateChanged?.Invoke();
             }
         }
+        /// <summary>Max consecutive automatic tool rounds before we stop, to guard against a
+        /// tool-call loop between the extension and Gemini. Reset by <see cref="ResetToolLoop"/>.</summary>
+        public int MaxToolRounds { get; set; } = 8;
+        private int _toolRounds = 0;
+        /// <summary>Call when a genuine (non-tool) user turn occurs to reset the loop guard.</summary>
+        public void ResetToolLoop() => _toolRounds = 0;
+
         async Task HandleAgentMessage(string modelResponse)
         {
-            var matches = Regex.Matches(modelResponse, $@"^\[TOOL_REQUEST (.+?)\]$", RegexOptions.IgnoreCase).ToArray();
-            var responses = new List<object?>();
-            Console.WriteLine($"matches.Length: {matches.Length}");
-            foreach (var m in matches)
+            // Fire-and-forget from the mutation handler, so it must never throw (an unobserved fault can
+            // surface as a runtime ThrowAsync). Catch send failures and log them.
+            try
             {
-                var args = JsonSerializer.Deserialize<List<JsonElement>>(m.Groups[1].Value)!;
-                var toolName = args[0].Deserialize<string>();
-                // until i wire up dynamic deserilizaiton based on the methods parameters, we hard code here
-                if (toolName == "Echo")
+                var calls = ToolProtocol.ParseCalls(modelResponse);
+                if (calls.Count == 0) return;
+
+                if (_toolRounds >= MaxToolRounds)
                 {
-                    var tool = Tools.FirstOrDefault(o => o.ToolName == toolName);
-                    // Echo
-                    var message = args[1].Deserialize<string>();
-                    dynamic ret = tool!.ToolHandler.DynamicInvoke(message)!;
-                    string retValue = await ret;
-                    responses.Add(retValue);
+                    _toolRounds = 0;
+                    await Query($"{ToolProtocol.ResultsMarker} Tool-call loop guard tripped after {MaxToolRounds} consecutive rounds; not executing further tool calls. Please continue without calling tools, or ask the user how to proceed.");
+                    return;
                 }
+                _toolRounds++;
+
+                var results = new List<object?>();
+                foreach (var call in calls)
+                {
+                    results.Add(await InvokeToolCallAsync(call));
+                }
+                var json = ToolProtocol.SerializeResults(results);
+                await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json);
             }
-            if (responses.Count == 0) return;
-            var json = JsonSerializer.Serialize(responses);
-            await Query("[TOOL_RESPONSE]", "tool-response.txt", json);
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Gemineachy: failed to deliver tool results to Gemini: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        /// <summary>Invoke one parsed tool call, mapping named JSON args to the delegate's parameters.
+        /// Never throws - failures are returned as {tool, ok:false, error} so Gemini can recover.</summary>
+        async Task<object?> InvokeToolCallAsync(ToolProtocol.ParsedCall call)
+        {
+            if (call.ParseError != null)
+                return new { tool = call.Tool, ok = false, error = call.ParseError };
+            if (!Tools.TryGetValue(call.Tool, out var tool))
+                return new { tool = call.Tool, ok = false, error = $"Unknown tool '{call.Tool}'. Call the tool by its exact registered name." };
+
+            try
+            {
+                var method = tool.ToolHandler.Method;
+                var parameters = method.GetParameters();
+                if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, out var argValues, out var bindError))
+                    return new { tool = call.Tool, ok = false, error = bindError };
+                var result = await InvokeMaybeAsync(tool.ToolHandler, argValues, method.ReturnType);
+                Console.WriteLine($"Tool '{call.Tool}' invoked.");
+                return new { tool = call.Tool, ok = true, result };
+            }
+            catch (Exception ex)
+            {
+                var msg = (ex as System.Reflection.TargetInvocationException)?.InnerException?.Message ?? ex.Message;
+                JS.LogError($"Tool '{call.Tool}' threw: {msg}");
+                return new { tool = call.Tool, ok = false, error = msg };
+            }
+        }
+
+        /// <summary>Invoke a delegate that may be synchronous, Task, or Task&lt;T&gt;, returning its value.</summary>
+        static async Task<object?> InvokeMaybeAsync(Delegate handler, object?[] args, Type returnType)
+        {
+            var result = handler.DynamicInvoke(args);
+            if (result is Task task)
+            {
+                await task.ConfigureAwait(false);
+                if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
+                    return returnType.GetProperty("Result")!.GetValue(task);
+                return null; // non-generic Task
+            }
+            return result;
         }
         private async Task AttachFiles(IEnumerable<File> files)
         {
@@ -220,7 +514,7 @@ namespace Gemineachy.Services
             // get input[type="file"]
             using var fileInput = await QuerySelectorAsync<HTMLInputElement>(FilesInputSelector, 5000);
             // get the current attached count to compare against during loading
-            var attachmentCountBefore = _document.QuerySelectorAll<HTMLDivElement>("uploader-file-preview gem-attachment").Using(o => o.Length);
+            var attachmentCountBefore = _document.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.Length);
             // add files to input[type="file"]
             using var dataTransfer = new DataTransfer();
             foreach (var f in files)
@@ -259,11 +553,14 @@ namespace Gemineachy.Services
                     return false;
                 }
                 // get the attachments
-                var attachments = d.QuerySelectorAll<HTMLDivElement>("uploader-file-preview gem-attachment").Using(o => o.ToArray());
-                // if the attachment count has not increased yet we need to wait
-                if (attachments.Length == attachmentCountBefore)
+                var attachments = d.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.ToArray());
+                // Wait for the count to increase. We do NOT wait for a specific total: Gemini caps
+                // attachments (currently 10), so requesting more never reaches an "expected" count and
+                // would hang. Any increase past the previous count means our upload registered.
+                if (attachments.Length <= attachmentCountBefore)
                 {
                     Console.WriteLine($"~ AttachFiles: attachments not added yet.");
+                    foreach (var a in attachments) a.Dispose();
                     return false;
                 }
                 Console.WriteLine($"Attachments: {attachments.Length}");
@@ -278,9 +575,11 @@ namespace Gemineachy.Services
             });
         }
         /// <summary>
-        /// Send an agent query and await the response<br/>
-        /// Send a named file with the message.<br/>
-        /// Useful for things like sending game data to the agent that the user should not see.
+        /// Send an agent query with a block of data, and await the response.<br/>
+        /// The data is INLINED into the (hidden) message rather than attached as a file: tool/game traffic
+        /// is already hidden from the user by CSS, so an attachment is no longer needed to keep it private -
+        /// and inlining avoids the file-upload flow entirely (which required Chrome's normal profile and was
+        /// a source of send errors). <paramref name="fileName"/> is kept as a readable label for the block.
         /// </summary>
         public async Task<string> Query(string text, string fileName, string fileText, double timeoutMS = 60000)
         {
@@ -288,14 +587,16 @@ namespace Gemineachy.Services
             return await Query(text, fileName, fileText, cts.Token);
         }
         /// <summary>
-        /// Send an agent query and await the response<br/>
-        /// Send a named file with the message.<br/>
-        /// Useful for things like sending game data to the agent that the user should not see.
+        /// Send an agent query with an inlined block of data (see the timeout overload), and await the response.
         /// </summary>
         public async Task<string> Query(string text, string fileName, string fileText, CancellationToken cancellationToken)
         {
-            using var file = string.IsNullOrEmpty(fileName) ? null : new File([fileText], fileName, new FileOptions { Type = "text/plain" });
-            return await Query(text, file == null ? null : [file], cancellationToken);
+            var body = string.IsNullOrEmpty(fileText)
+                ? text
+                : (string.IsNullOrEmpty(fileName)
+                    ? $"{text}\n\n{fileText}"
+                    : $"{text}\n\n--- {fileName} ---\n{fileText}");
+            return await Query(body, (IEnumerable<File>?)null, cancellationToken);
         }
         /// <summary>
         /// Send an agent query and await the response
@@ -326,16 +627,89 @@ namespace Gemineachy.Services
                 return "";
             }
             var haveLock = false;
-            var removeOnQuery = false;
-            var tcs = new TaskCompletionSource<Task<string>>();
-            void onQuery(string query, Task<string> response) => tcs.TrySetResult(response);
             try
             {
                 await _queryLock.WaitAsync(cancellationToken);
                 haveLock = true;
                 await WhileBusy.WaitAsync(cancellationToken);
-                using var inputElement = QuerySelector<HTMLDivElement>(TextInputSelector);
-                ArgumentNullException.ThrowIfNull(inputElement);
+                return await SendWithRetryAsync(text, files, cancellationToken);
+            }
+            finally
+            {
+                if (haveLock) _queryLock.Release();
+            }
+        }
+
+        /// <summary>Max times to (re)click Send when Gemini doesn't accept a message (e.g. transient errors).</summary>
+        public int MaxSendAttempts { get; set; } = 3;
+        /// <summary>How long to wait for the compose box to clear (= send accepted) before treating a send as failed.</summary>
+        public double SendAcceptTimeoutMs { get; set; } = 8000;
+
+        /// <summary>
+        /// Send the message and await Gemini's response, verifying the send was ACCEPTED (Gemini clears
+        /// the compose box only on success) and retrying if not. A failed send leaves the compose box
+        /// intact, so a retry is just another Send click - no re-typing, no duplicate attachments.
+        /// </summary>
+        private async Task<string> SendWithRetryAsync(string text, IEnumerable<File>? files, CancellationToken ct)
+        {
+            // Hide/collapse the compose box's inner text for the whole send so our programmatic type+send
+            // doesn't flash or grow/shrink the box. (Empty box during the response wait looks identical to
+            // a normal empty box, so keeping it on across the response is fine.)
+            SetToolSending(true);
+            try
+            {
+            for (int attempt = 1; attempt <= MaxSendAttempts; attempt++)
+            {
+                var tcs = new TaskCompletionSource<Task<string>>();
+                void onQuery(string query, Task<string> response) => tcs.TrySetResult(response);
+                OnQuery += onQuery;
+                try
+                {
+                    await PrepareAndSendAsync(text, files, ct);
+                    if (await WaitForSendAcceptedAsync(ct))
+                    {
+                        // Accepted (compose box cleared). Await the model response.
+                        var response = await tcs.Task.WaitAsync(ct);
+                        return await response.WaitAsync(ct);
+                    }
+                    // Failure diagnostics (only on a failed send, so no spam): what did the compose box look
+                    // like, and does Gemini show an error toast?
+                    Console.WriteLine($"Gemineachy: send attempt {attempt}/{MaxSendAttempts} NOT accepted. composeText=\"{Trunc(CurrentComposeText())}\" errorToast=\"{DetectErrorText()}\"");
+                }
+                finally
+                {
+                    OnQuery -= onQuery;
+                }
+                if (attempt < MaxSendAttempts)
+                    await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct); // simple backoff
+            }
+            // Permanent failure: clear the stale text so it does not linger in the user's compose box.
+            Console.WriteLine($"Gemineachy: message not accepted after {MaxSendAttempts} attempts; clearing compose. errorToast=\"{DetectErrorText()}\"");
+            await ClearComposeAsync();
+            throw new GeminiSendException($"Gemini did not accept the message after {MaxSendAttempts} attempts.");
+            }
+            finally
+            {
+                SetToolSending(false);
+            }
+        }
+
+        /// <summary>
+        /// Ensure the compose box holds exactly this message (text + the expected attachments), then Send.
+        /// Idempotent across retries: we (re)type only if the text differs, and (re)attach only if the
+        /// attachments are missing - a failed send commonly keeps the text but DROPS the file, so a naive
+        /// "text already there, skip" would resend with no attachment.
+        /// </summary>
+        private async Task PrepareAndSendAsync(string text, IEnumerable<File>? files, CancellationToken ct)
+        {
+            var fileList = files?.ToList();
+            var hasFiles = fileList is { Count: > 0 };
+
+            using var inputElement = QuerySelector<HTMLDivElement>(TextInputSelector);
+            ArgumentNullException.ThrowIfNull(inputElement);
+
+            if ((inputElement.TextContent ?? "") != text)
+            {
                 inputElement.Focus();
                 inputElement.TextContent = text;
                 using var inputEvent = new InputEvent("input", new InputEventOptions
@@ -346,31 +720,89 @@ namespace Gemineachy.Services
                     Data = text
                 });
                 inputElement.DispatchEvent(inputEvent);
-                // give the dom a chance to react
                 await Task.Delay(1);
-                if (files != null && files.Count() > 0)
-                {
-                    await AttachFiles(files);
-                }
-                // the send button should now be visible
-                using var sendButton = await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector);
-                // get ready to handle the result
-                OnQuery += onQuery;
-                removeOnQuery = true;
-                // Try clicking the send button first as it's the most reliable method
-                sendButton.Click();
-                var response = await tcs.Task.WaitAsync(cancellationToken);
-                var resp = await response.WaitAsync(cancellationToken);
-                return resp;
             }
-            finally
+
+            // (Re)attach only when NOTHING is attached: initial send, or a retry after a failed send
+            // dropped the file. We compare against zero (not the file count) because Gemini caps
+            // attachments, so a "did every file attach?" check could never be satisfied for large sets.
+            if (hasFiles && CurrentAttachmentCount() == 0)
             {
-                if (haveLock) _queryLock.Release();
-                if (removeOnQuery)
-                {
-                    OnQuery -= onQuery;
-                }
+                await AttachFiles(fileList!);
             }
+
+            using var sendButton = await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector, ct);
+            sendButton.Click();
+        }
+
+        /// <summary>Send is accepted when Gemini clears the compose box; times out (=> failed) otherwise.</summary>
+        private async Task<bool> WaitForSendAcceptedAsync(CancellationToken ct)
+        {
+            using var acceptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            acceptCts.CancelAfter(TimeSpan.FromMilliseconds(SendAcceptTimeoutMs));
+            try
+            {
+                await QuerySelectorAsync(d =>
+                {
+                    using var input = d.QuerySelector<HTMLDivElement>(TextInputSelector);
+                    return string.IsNullOrEmpty(input?.TextContent);
+                }, acceptCts.Token);
+                return true;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return false; // accept timeout -> failed send, caller retries
+            }
+        }
+
+        private int CurrentAttachmentCount() =>
+            _document?.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.Length) ?? 0;
+
+        private string CurrentComposeText()
+        {
+            using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
+            return input?.TextContent ?? "";
+        }
+
+        /// <summary>DEBUG: best-effort scan for a Gemini error toast/snackbar so failure logs can show it.</summary>
+        private string DetectErrorText()
+        {
+            if (_document == null) return "";
+            foreach (var sel in new[] { "mat-snack-bar-container", "[role='alert']", "[class*='snackbar']", "[class*='error-']", "[class*='-error']" })
+            {
+                try
+                {
+                    using var el = _document.QuerySelector(sel);
+                    var t = el?.TextContent?.Trim();
+                    if (!string.IsNullOrEmpty(t)) return $"{sel} => {t}";
+                }
+                catch { }
+            }
+            return "(none found)";
+        }
+
+        private static string Trunc(string s, int n = 48) =>
+            string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s.Substring(0, n) + "…").Replace("\n", "\\n");
+
+        /// <summary>Clear the compose box (used after a permanent send failure so stale text doesn't linger).</summary>
+        private async Task ClearComposeAsync()
+        {
+            try
+            {
+                using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
+                if (input == null) return;
+                input.Focus();
+                input.TextContent = "";
+                using var ev = new InputEvent("input", new InputEventOptions
+                {
+                    Bubbles = true,
+                    Cancelable = true,
+                    InputType = "deleteContentBackward"
+                });
+                input.DispatchEvent(ev);
+                await Task.Delay(1);
+            }
+            catch { /* best effort */ }
         }
         #region DOM stuff
         /// <summary>
