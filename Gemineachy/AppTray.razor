@@ -78,8 +78,9 @@ To ask me the time simply respond to the user ""[TOOL_REQUEST: get_time]"" and I
     /// <returns></returns>
     async Task TestFileAttachment()
     {
-        using var myFile = new File(["Hellow world!"], "myfile.txt", new FileOptions { Type = "text/plain" });
-        await _geminiChatService.Query("This is a file I have been workign on.", [myFile]);
+        using var myFileA = new File(["Hellow world A!"], "myfileA.txt", new FileOptions { Type = "text/plain" });
+        using var myFileB = new File(["Hellow world B!"], "myfileB.txt", new FileOptions { Type = "text/plain" });
+        await _geminiChatService.Query("This is a test of programmatic file attachment.", [myFileA, myFileB]);
     }
     public void Dispose()
     {

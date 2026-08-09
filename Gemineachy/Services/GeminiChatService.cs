@@ -7,8 +7,9 @@ namespace Gemineachy.Services
 {
     public class GeminiChatService(SpawnJSRuntime JS) : IAsyncBackgroundService
     {
+        const string FileAttachmentsSelector = "uploader-file-preview gem-attachment";
         const string TextInputSelector = "chat-window div[contenteditable=\"true\"]";
-        const string FilesInputSelector = "chat-window input[type='file']";
+        const string FilesInputSelector = "input[type='file']";
         const string UploadButtonSelector = "chat-window button[aria-label*=\"Upload\"]";
         const string DictateButtonSelector = "chat-window button[aria-label*=\"Dictate\"]";
         const string SendButtonSelector = "chat-window button[aria-label*=\"Send\"]";
@@ -163,9 +164,47 @@ namespace Gemineachy.Services
             // fire events to notify the page
             using var inputEvent = new Event("input", eventInit);
             using var changeEvent = new Event("change", eventInit);
+
+            var attachmentCountBefore = _document.QuerySelectorAll<HTMLDivElement>("uploader-file-preview gem-attachment").Using(o => o.Length);
+
             fileInput.DispatchEvent(inputEvent);
             fileInput.DispatchEvent(changeEvent);
-            await Task.Delay(1);
+            // wait for the file(s) to be processed
+            await QuerySelectorAsync(async (d) =>
+            {
+                // do not return true until all none of the files have progress bars
+                // "svg[class*='progress']"
+                // document.querySelectorAll("uploader-file-preview gem-attachment svg[class*='progress']")
+                var isProcessing = IsProcessing();
+                if (isProcessing)
+                {
+                    Console.WriteLine($"~ AttachFiles: processing");
+                    return false;
+                }
+                using var progressSVGs = d.QuerySelectorAll<HTMLDivElement>("uploader-file-preview gem-attachment svg[class*='progress']");
+                // if any loading progress bars are still there we need to keep waiting
+                if (progressSVGs.Length > 0)
+                {
+                    Console.WriteLine($"~ AttachFiles: still loading");
+                    return false;
+                }
+                // get the attachments
+                var attachments= d.QuerySelectorAll<HTMLDivElement>("uploader-file-preview gem-attachment").Using(o => o.ToArray());
+                // if the attachment count has not increased yet we need to wait
+                if (attachments.Length == attachmentCountBefore)
+                {
+                    Console.WriteLine($"~ AttachFiles: attachments not added yet.");
+                    return false;
+                }
+                Console.WriteLine($"Attachments: {attachments.Length}");
+                foreach(var attachment in attachments)
+                {
+                    var labelType = attachment.QuerySelector(".gem-attachment-extension-label")?.Using(o => o.TextContent);
+                    var labelName = attachment.QuerySelector(".gem-attachment-text")?.Using(o => o.TextContent);
+                    Console.WriteLine($"Attachment: {labelType} {labelName}");
+                }
+                return true;
+            });
         }
         /// <summary>
         /// Send an agent query and await the response
@@ -229,28 +268,12 @@ namespace Gemineachy.Services
                     await AttachFiles(files);
                 }
                 // the send button should now be visible
-                using var sendButton = QuerySelector<HTMLButtonElement>(SendButtonSelector);
+                using var sendButton = await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector);
                 // get ready to handle the result
                 OnQuery += onQuery;
                 removeOnQuery = true;
                 // Try clicking the send button first as it's the most reliable method
-                if (sendButton != null && !sendButton.Disabled)
-                {
-                    sendButton.Click();
-                }
-                else
-                {
-                    // Fallback to Enter keydown/keyup simulation
-                    using var keyboardEvent = new KeyboardEvent("keydown", new KeyboardEventOptions
-                    {
-                        Bubbles = true,
-                        Key = "Enter",
-                        Code = "Enter",
-                        KeyCode = 13,
-                        Which = 13,
-                    });
-                    inputElement.DispatchEvent(keyboardEvent);
-                }
+                sendButton.Click();
                 var response = await tcs.Task.WaitAsync(cancellationToken);
                 var resp = await response.WaitAsync(cancellationToken);
                 return resp;
@@ -268,19 +291,35 @@ namespace Gemineachy.Services
         /// <summary>
         /// Asynchronously wait for the selector to return the the specified Element
         /// </summary>
-        public Task<TNode> QuerySelectorAsync<TNode>(string selector) where TNode : Element => QuerySelectorAsync<TNode>(selector, CancellationToken.None);
+        public Task<TNode> QuerySelectorAsync<TNode>(string selector) where TNode : Element => QuerySelectorAsync<TNode>(selector, null, CancellationToken.None);
         /// <summary>
         /// Asynchronously wait for the selector to return the the specified Element
         /// </summary>
         public async Task<TNode> QuerySelectorAsync<TNode>(string selector, double waitMS) where TNode : Element
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(waitMS));
-            return await QuerySelectorAsync<TNode>(selector, cts.Token);
+            return await QuerySelectorAsync<TNode>(selector, null, cts.Token);
         }
         /// <summary>
         /// Asynchronously wait for the selector to return the the specified Element
         /// </summary>
-        public async Task<TNode> QuerySelectorAsync<TNode>(string selector, CancellationToken cancellationToken) where TNode : Element
+        public Task<TNode> QuerySelectorAsync<TNode>(string selector, CancellationToken cancellationToken) where TNode : Element => QuerySelectorAsync(selector, (Func<TNode, bool>?)null, cancellationToken);
+        /// <summary>
+        /// Asynchronously wait for the selector to return the the specified Element
+        /// </summary>
+        public Task<TNode> QuerySelectorAsync<TNode>(string selector, Func<TNode, bool>? where) where TNode : Element => QuerySelectorAsync<TNode>(selector, where, CancellationToken.None);
+        /// <summary>
+        /// Asynchronously wait for the selector to return the the specified Element
+        /// </summary>
+        public async Task<TNode> QuerySelectorAsync<TNode>(string selector, Func<TNode, bool>? where, double waitMS) where TNode : Element
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(waitMS));
+            return await QuerySelectorAsync<TNode>(selector, where, cts.Token);
+        }
+        /// <summary>
+        /// Asynchronously wait for the selector to return the the specified Element
+        /// </summary>
+        public async Task<TNode> QuerySelectorAsync<TNode>(string selector, Func<TNode, bool>? where, CancellationToken cancellationToken) where TNode : Element
         {
             ArgumentNullException.ThrowIfNull(_document);
             var ret = _document.QuerySelector<TNode>(selector);
@@ -290,7 +329,7 @@ namespace Gemineachy.Services
                 void mutationCallback()
                 {
                     ret = _document.QuerySelector<TNode>(selector);
-                    if (ret != null) tcs.TrySetResult();
+                    if (ret != null && (where?.Invoke(ret) ?? true)) tcs.TrySetResult();
                 }
                 OnDOMMutation += mutationCallback;
                 try
@@ -303,6 +342,40 @@ namespace Gemineachy.Services
                 }
             }
             return ret!;
+        }
+        public Task QuerySelectorAsync(Func<Document, Task<bool>> where) => QuerySelectorAsync(where, CancellationToken.None);
+        /// <summary>
+        /// Wait until the specfiied callback returns true
+        /// </summary>
+        /// <typeparam name="TNode"></typeparam>
+        /// <param name="where"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        public async Task QuerySelectorAsync(Func<Document, Task<bool>> where, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(_document);
+            var tcs = new TaskCompletionSource();
+            async void mutationCallback()
+            {
+                try
+                {
+                    var succ = await where(_document);
+                    if (succ) tcs.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }
+            OnDOMMutation += mutationCallback;
+            try
+            {
+                await tcs.Task.WaitAsync(cancellationToken);
+            }
+            finally
+            {
+                OnDOMMutation -= mutationCallback;
+            }
         }
         /// <summary>
         /// Use the selector to return the the specified Element
