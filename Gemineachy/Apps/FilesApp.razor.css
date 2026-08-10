@@ -1,0 +1,118 @@
+.files-app {
+    width: 420px;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.files-section { display: flex; flex-direction: column; gap: 8px; }
+.files-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #888;
+}
+.files-empty { font-size: 0.85rem; color: #aaa; line-height: 1.4; }
+
+.mount-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: #2c2c34;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+.mount-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mount-path { font-weight: 600; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.mount-kind {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #9a9ab0;
+    background: #3a3a44;
+    border-radius: 5px;
+    padding: 1px 6px;
+}
+.mount-perm { font-size: 0.72rem; }
+.mount-perm.ok { color: #59d38b; }
+.mount-perm.ro { color: #e0b64a; }
+.mount-perm.none { color: #e06a6a; }
+
+.mount-actions { display: flex; align-items: center; gap: 8px; }
+.persist-btn {
+    background: #3a3a44;
+    color: #bbb;
+    border: none;
+    border-radius: 8px;
+    padding: 5px 12px;
+    cursor: pointer;
+    font-size: 0.75rem;
+}
+.persist-btn.on { background: #4a3f7a; color: #eee; }
+
+.files-btn {
+    background: #3a3a44;
+    color: #eee;
+    border: none;
+    border-radius: 8px;
+    padding: 5px 12px;
+    cursor: pointer;
+}
+.files-btn:disabled { opacity: 0.6; cursor: default; }
+.files-btn.add { background: #7b61ff; }
+.files-btn.grant { background: #2f6d46; }
+.files-btn.remove { background: #5a2f34; }
+
+.files-add { display: flex; flex-direction: column; gap: 8px; }
+.mount-name-input {
+    background: #26262e;
+    color: #eee;
+    border: 1px solid #3a3a44;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    outline: none;
+}
+.mount-name-input:focus { border-color: #7b61ff; }
+.files-actions { display: flex; gap: 10px; }
+
+.files-status {
+    font-size: 0.8rem;
+    color: #ccc;
+    background: #26262e;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+.activity-list { display: flex; flex-direction: column; gap: 4px; }
+.activity-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.78rem;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.activity-op {
+    min-width: 52px;
+    text-align: center;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    background: #3a3a44;
+    color: #cfcfe0;
+}
+.activity-op.op-write, .activity-op.op-append, .activity-op.op-mkdir { background: #2f5d7d; }
+.activity-op.op-delete { background: #5a2f34; }
+.activity-op.op-read, .activity-op.op-list, .activity-op.op-info { background: #2f5d46; }
+.activity-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
+.activity-time { color: #777; }
+
+.files-footer {
+    font-size: 0.72rem;
+    color: #666;
+    text-align: center;
+}

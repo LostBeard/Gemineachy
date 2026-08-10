@@ -288,6 +288,31 @@ namespace Gemineachy.Services
         }
         [AgentTool("Returns the user's current local date and time as a string.")]
         string GetTime() => DateTime.Now.ToString();
+
+        // --- Tool discovery (keeps the standing manifest lean: it lists names + one-liners; the full
+        //     argument schemas are fetched on demand through these) --------------------------------------
+        [AgentTool("Find tools by keywords (space or comma separated). Returns the matching tools WITH their full argument schemas, ready to call. Use this to discover which tool to use and how to call it.")]
+        string SearchTools(string query)
+        {
+            var matches = ToolProtocol.MatchTools(Tools.Values, query);
+            if (matches.Count == 0)
+                return $"No tools match '{query}'. Call {ToolProtocol.ListToolsName} to see everything available.";
+            return ToolProtocol.SerializeSchemas(matches);
+        }
+        [AgentTool("Returns the full argument schema for a tool by exact name, or several names comma-separated (in either 'name' or 'names'). Call this before using a tool whose arguments you are unsure of.")]
+        string GetToolSchema(string name = "", string names = "")
+        {
+            var combined = string.Join(",", new[] { name, names }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            var wanted = combined.Split(',').Select(n => n.Trim()).Where(n => n.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var matches = Tools.Values.Where(t => wanted.Contains(t.ToolName)).ToList();
+            if (matches.Count == 0)
+                return $"No tool named '{name}'. Call {ToolProtocol.ListToolsName} or {ToolProtocol.SearchToolsName} (keywords) to find it.";
+            return ToolProtocol.SerializeSchemas(matches);
+        }
+        [AgentTool("Returns the current tool index: every available tool's name and a one-line summary (no argument schemas). Use SearchTools or GetToolSchema for a tool's arguments.")]
+        string ListTools() => ToolProtocol.BuildToolIndex(Tools.Values);
+
         public bool UnregisterTool(string toolName)
         {
             return Tools.Remove(toolName);
@@ -357,25 +382,73 @@ namespace Gemineachy.Services
             Console.WriteLine($"Echo was called: {message}");
             return message;
         }
-        [AgentTool("Re-sends the full tool manifest to you. Call if you have lost track of the available tools.")]
-        public async Task SendToolInfo()
+        // Names of the tools Gemini has already been told about, so a register/unregister can send only
+        // the DELTA (added/removed) instead of re-dumping the whole manifest. Empty until the first
+        // introduction (SendToolInfo).
+        private readonly HashSet<string> _announcedTools = new();
+        private bool _protocolIntroduced;
+
+        [AgentTool("Re-sends the tool manifest (protocol + the current tool index) to you. Call if you have lost track of the available tools or how to call them.")]
+        public async Task SendToolInfo() => await SendToolInfo(null);
+        /// <summary>
+        /// (Re)introduce the full standing manifest: protocol + discovery instructions + the compact tool
+        /// index (names + one-line summaries; NOT the full argument schemas - those are fetched on demand
+        /// via SearchTools/GetToolSchema). Resets the announced-set baseline so subsequent
+        /// <see cref="AnnounceToolChanges"/> calls send only deltas.
+        /// </summary>
+        /// <param name="addendum">Optional context for why the manifest is being (re)sent.</param>
+        public async Task SendToolInfo(string? addendum)
         {
             var manifest = ToolProtocol.BuildManifest(Tools.Values);
-            // Protocol instructions live in the visible message; the full schema rides as an attachment
-            // so it does not clutter the chat. The manifest text is self-contained either way.
-            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest", ToolProtocol.ManifestFileName, manifest);
+            var header = $"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest"
+                       + (string.IsNullOrWhiteSpace(addendum) ? "" : $" (Addendum: {addendum})");
+            // Set the baseline BEFORE the await so a tool change racing the send still diffs correctly.
+            _announcedTools.Clear();
+            foreach (var n in Tools.Keys) _announcedTools.Add(n);
+            _protocolIntroduced = true;
+            await Query(header, ToolProtocol.ManifestFileName, manifest);
         }
         /// <summary>
-        /// Send the current tool info to the agent
+        /// Announce a tool change to Gemini as a DELTA. The first call (before any introduction) sends the
+        /// full standing manifest; after that it sends only what was added (name + one-line summary) and
+        /// removed (name) since the last announcement, plus a brief call/discovery reminder. Robust no
+        /// matter how Tools was mutated - it diffs the live set against what Gemini was last told.
         /// </summary>
-        /// <param name="addendum">Add context to why the tool info is being sent.</param>
-        /// <returns></returns>
-        public async Task SendToolInfo(string addendum)
+        /// <param name="addendum">Optional context to append (e.g. game setup instructions).</param>
+        public async Task AnnounceToolChanges(string? addendum = null)
         {
-            var manifest = ToolProtocol.BuildManifest(Tools.Values);
-            // Protocol instructions live in the visible message; the full schema rides as an attachment
-            // so it does not clutter the chat. The manifest text is self-contained either way.
-            await Query($"{ToolProtocol.ManifestMarker} {nameof(Gemineachy)} tool manifest (Addendum: {addendum})", ToolProtocol.ManifestFileName, manifest);
+            if (!_protocolIntroduced)
+            {
+                // Nothing introduced yet: the first message must carry the protocol + index.
+                await SendToolInfo(addendum);
+                return;
+            }
+            var current = Tools.Keys.ToHashSet();
+            var added = Tools.Values.Where(t => !_announcedTools.Contains(t.ToolName)).ToList();
+            var removed = _announcedTools.Where(n => !current.Contains(n)).ToList();
+            if (added.Count == 0 && removed.Count == 0 && string.IsNullOrWhiteSpace(addendum))
+                return; // nothing to say
+            // Update the baseline before the await (see SendToolInfo note).
+            _announcedTools.Clear();
+            foreach (var n in current) _announcedTools.Add(n);
+            var message = ToolProtocol.BuildToolChangeMessage(added, removed, addendum);
+            await Query($"{ToolProtocol.ManifestMarker} tool change", ToolProtocol.ManifestFileName, message);
+        }
+
+        /// <summary>
+        /// Send Gemini a hidden informational note about tool CONTEXT that isn't a tool add/remove (e.g. a
+        /// filesystem mount appearing/disappearing). If the manifest hasn't been introduced yet, this sends
+        /// the full lean manifest with the note as its addendum so the tools get introduced too.
+        /// </summary>
+        public async Task NotifyToolContext(string note)
+        {
+            if (string.IsNullOrWhiteSpace(note)) return;
+            if (!_protocolIntroduced)
+            {
+                await SendToolInfo(note);
+                return;
+            }
+            await Query($"{ToolProtocol.ManifestMarker} {note}");
         }
         private void Mutation_Observed()
         {
@@ -482,8 +555,26 @@ namespace Gemineachy.Services
         /// tool-call loop between the extension and Gemini. Reset by <see cref="ResetToolLoop"/>.</summary>
         public int MaxToolRounds { get; set; } = 8;
         private int _toolRounds = 0;
+        // Signature of the previous round's calls + whether that round produced any failure. Used to
+        // detect a model stuck re-emitting a call identical to one that JUST failed (observed: Gemini
+        // repeating the same malformed CheckersBoard.Move 4x). Re-executing it only reproduces the same
+        // error, so we break the loop with a sharper corrective nudge instead of round-tripping again.
+        private string? _lastRoundSig = null;
+        private bool _lastRoundFailed = false;
         /// <summary>Call when a genuine (non-tool) user turn occurs to reset the loop guard.</summary>
-        public void ResetToolLoop() => _toolRounds = 0;
+        public void ResetToolLoop()
+        {
+            _toolRounds = 0;
+            _lastRoundSig = null;
+            _lastRoundFailed = false;
+        }
+
+        /// <summary>Order-sensitive signature of a round's calls (tool name + argument JSON), so an
+        /// identical repeat is recognizable regardless of surrounding prose or whitespace.</summary>
+        private static string RoundSignature(List<ToolProtocol.ParsedCall> calls) =>
+            string.Join("␞", calls.Select(c => c.ParseError != null
+                ? $"!{c.Raw}"
+                : $"{c.Tool}({(c.HasArgs ? c.Args.GetRawText() : "")})"));
 
         async Task HandleAgentMessage(string modelResponse)
         {
@@ -500,13 +591,28 @@ namespace Gemineachy.Services
                     await Query($"{ToolProtocol.ResultsMarker} Tool-call loop guard tripped after {MaxToolRounds} consecutive rounds; not executing further tool calls. Please continue without calling tools, or ask the user how to proceed.");
                     return;
                 }
+
+                // If the model just repeated a call identical to one that already failed, don't re-run
+                // it (same input -> same failure). Nudge it to change the call instead.
+                var sig = RoundSignature(calls);
+                if (_lastRoundFailed && sig == _lastRoundSig)
+                {
+                    _toolRounds++;
+                    await Query($"{ToolProtocol.ResultsMarker} That tool call is identical to the previous one, which failed with the same error - re-sending it will not change the result. Read the error above and change the call before retrying (check the tool name, the required argument names, and their values). Arguments may be passed either nested as {{\"tool\":\"Name\",\"args\":{{...}}}} or flat as {{\"tool\":\"Name\",\"argName\":value}}.");
+                    return;
+                }
                 _toolRounds++;
 
-                var results = new List<object?>();
+                var results = new List<ToolResult>();
+                bool anyFailed = false;
                 foreach (var call in calls)
                 {
-                    results.Add(await InvokeToolCallAsync(call));
+                    var result = await InvokeToolCallAsync(call);
+                    results.Add(result);
+                    if (!result.Ok) anyFailed = true;
                 }
+                _lastRoundSig = sig;
+                _lastRoundFailed = anyFailed;
                 var json = ToolProtocol.SerializeResults(results);
                 await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json);
             }
@@ -516,30 +622,41 @@ namespace Gemineachy.Services
             }
         }
 
+        /// <summary>One tool invocation's outcome, serialized back to Gemini as
+        /// {tool, ok, result?} on success or {tool, ok:false, error} on failure. A concrete type (not
+        /// an anonymous object) so the ok flag can be read directly and it survives trimming.</summary>
+        public sealed class ToolResult
+        {
+            [JsonPropertyName("tool")] public string Tool { get; set; } = "";
+            [JsonPropertyName("ok")] public bool Ok { get; set; }
+            [JsonPropertyName("result")] public object? Result { get; set; }
+            [JsonPropertyName("error")] public string? Error { get; set; }
+        }
+
         /// <summary>Invoke one parsed tool call, mapping named JSON args to the delegate's parameters.
         /// Never throws - failures are returned as {tool, ok:false, error} so Gemini can recover.</summary>
-        async Task<object?> InvokeToolCallAsync(ToolProtocol.ParsedCall call)
+        async Task<ToolResult> InvokeToolCallAsync(ToolProtocol.ParsedCall call)
         {
             if (call.ParseError != null)
-                return new { tool = call.Tool, ok = false, error = call.ParseError };
+                return new ToolResult { Tool = call.Tool, Ok = false, Error = call.ParseError };
             if (!Tools.TryGetValue(call.Tool, out var tool))
-                return new { tool = call.Tool, ok = false, error = $"Unknown tool '{call.Tool}'. Call the tool by its exact registered name." };
+                return new ToolResult { Tool = call.Tool, Ok = false, Error = $"Unknown tool '{call.Tool}'. Call the tool by its exact registered name." };
 
             try
             {
                 var method = tool.MethodInfo;
                 var parameters = method.GetParameters();
                 if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, out var argValues, out var bindError))
-                    return new { tool = call.Tool, ok = false, error = bindError };
+                    return new ToolResult { Tool = call.Tool, Ok = false, Error = bindError };
                 var result = await InvokeMaybeAsync(tool, argValues, method.ReturnType);
                 Console.WriteLine($"Tool '{call.Tool}' invoked.");
-                return new { tool = call.Tool, ok = true, result };
+                return new ToolResult { Tool = call.Tool, Ok = true, Result = result };
             }
             catch (Exception ex)
             {
                 var msg = (ex as System.Reflection.TargetInvocationException)?.InnerException?.Message ?? ex.Message;
                 JS.LogError($"Tool '{call.Tool}' threw: {msg}");
-                return new { tool = call.Tool, ok = false, error = msg };
+                return new ToolResult { Tool = call.Tool, Ok = false, Error = msg };
             }
         }
 

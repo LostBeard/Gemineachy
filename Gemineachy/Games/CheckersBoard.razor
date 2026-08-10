@@ -70,6 +70,11 @@
         StateHasChanged();
     }
 
+    // Game setup context sent to Gemini. Kept in one place so mount (with a tool-change delta) and
+    // "New Game" (a plain game message, no tool change) share the exact same wording.
+    private string GameSetupText =>
+        $"The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.";
+
     private async Task ResetGame()
     {
         Game.InitializeBoard();
@@ -77,7 +82,9 @@
         _announcedOver = false;
         RefreshTargets();
 
-        await _geminiChatService.SendToolInfo($"The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.");
+        // Tools are unchanged on reset - this is game context, not a tool change - so send it as a
+        // (hidden) game message rather than re-announcing the manifest.
+        await _geminiChatService.Query($"{ToolProtocol.GameMarker} A new checkers game has started. {GameSetupText}");
 
         StateHasChanged();
     }
@@ -109,10 +116,11 @@
         Game.OnStateChanged += HandleGameStateChanged;
         RefreshTargets();
 
-        // register the AgentToolAttribute marked methods in this instance
+        // register the AgentToolAttribute marked methods in this instance, then tell Gemini what changed
+        // (first time: full manifest; otherwise just the added CheckersBoard.* tools) plus the game setup.
         _geminiChatService.Register(this);
 
-        await _geminiChatService.SendToolInfo($"The user has challenged you to checkers (English draughts). The user plays Red on a visual board; you play Black. Red moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the CheckersBoard.Move tool with PDN notation from the legal-move list. Captures are mandatory. The user follows the game on the board, so keep the chat clean: after you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply). If the user asks you to narrate or chat about the game, reply normally instead.");
+        await _geminiChatService.AnnounceToolChanges(GameSetupText);
     }
 
     // Fired by the engine on every state change (selection or applied move). This can fire from a
@@ -203,9 +211,8 @@
         if (!_beenInit) return;
         _beenInit = false;
         Game.OnStateChanged -= HandleGameStateChanged;
-        // unregsiter this instance
+        // unregister this instance, then notify Gemini of just the removed tools (delta, not a re-dump).
         _geminiChatService.Unregister(this);
-        // Notify the agent of the tool changes and why.
-        await _geminiChatService.SendToolInfo("Checkers: User closed game.");
+        await _geminiChatService.AnnounceToolChanges("The checkers game was closed by the user.");
     }
 }

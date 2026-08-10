@@ -1,0 +1,155 @@
+@using Gemineachy.Desktop
+@using Gemineachy.Services
+@attribute [App(Name = "Files", Icon = "🗂", Pinned = true, SingleInstance = true, Description = "Mount folders the agent can read and write")]
+@inherits AppBase
+@inject FileSystemService Fs
+
+<div class="files-app">
+    <div class="files-section">
+        <div class="files-title">Mounted folders</div>
+
+        @if (Fs.Mounts.Count == 0)
+        {
+            <div class="files-empty">No folders mounted. Add OPFS or mount a local folder below - the agent can then read and write files under it.</div>
+        }
+        else
+        {
+            @foreach (var m in Fs.Mounts)
+            {
+                <div class="mount-row">
+                    <div class="mount-main">
+                        <span class="mount-path">/@m.Name</span>
+                        <span class="mount-kind">@m.Kind</span>
+                        <span class="mount-perm @PermClass(m)">@PermLabel(m)</span>
+                    </div>
+                    <div class="mount-actions">
+                        @if (m.Permission != "rw")
+                        {
+                            <button class="files-btn grant" @onclick="() => Grant(m.Name)">Grant</button>
+                        }
+                        <button class="persist-btn @(m.Persist ? "on" : "")"
+                                title="Save access in the browser and restore it on reload"
+                                @onclick="() => TogglePersist(m.Name, !m.Persist)">
+                            @(m.Persist ? "persist ✓" : "persist")
+                        </button>
+                        <button class="files-btn remove" @onclick="() => Remove(m.Name)">Remove</button>
+                    </div>
+                </div>
+            }
+        }
+    </div>
+
+    <div class="files-add">
+        <input class="mount-name-input" placeholder="mount name (optional)"
+               @bind="_mountName" @bind:event="oninput" />
+        <div class="files-actions">
+            <button class="files-btn add" @onclick="AddOpfs" disabled="@_busy">+ Add OPFS</button>
+            <button class="files-btn add" @onclick="MountFolder" disabled="@_busy">+ Mount folder…</button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_status))
+    {
+        <div class="files-status">@_status</div>
+    }
+
+    <div class="files-section">
+        <div class="files-title">Recent agent activity</div>
+        @if (Fs.RecentAccess.Count == 0)
+        {
+            <div class="files-empty">Nothing accessed yet. When Gemini reads or writes files, it appears here.</div>
+        }
+        else
+        {
+            <div class="activity-list">
+                @foreach (var a in Fs.RecentAccess.Take(8))
+                {
+                    <div class="activity-row">
+                        <span class="activity-op op-@a.Op">@a.Op</span>
+                        <span class="activity-path">@a.Path</span>
+                        <span class="activity-time">@a.Time.ToString("HH:mm:ss")</span>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="files-footer">Mounts appear to the agent as /name · a shared folder is a DevComms channel</div>
+</div>
+
+@code {
+    private bool _busy;
+    private string? _status;
+    private string _mountName = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Fs.OnChanged += OnFsChanged;
+        // Ensure the service has initialized (tools registered, persisted mounts restored) before the
+        // user can mount anything - so a mount notification always follows tool registration.
+        await Fs.Ready;
+        await Fs.RefreshPermissionsAsync();
+    }
+
+    private void OnFsChanged() => InvokeAsync(StateHasChanged);
+
+    private string PermLabel(FsMount m) => m.Permission switch
+    {
+        "rw" => "read/write",
+        "r" => "read only",
+        _ => "no access"
+    };
+    private string PermClass(FsMount m) => m.Permission switch { "rw" => "ok", "r" => "ro", _ => "none" };
+
+    private async Task AddOpfs()
+    {
+        await Run(async () =>
+        {
+            _status = await Fs.AddOpfsMountAsync(string.IsNullOrWhiteSpace(_mountName) ? "opfs" : _mountName);
+            _mountName = "";
+        });
+    }
+
+    private async Task MountFolder()
+    {
+        await Run(async () =>
+        {
+            _status = await Fs.MountFolderAsync(_mountName);
+            _mountName = "";
+        });
+    }
+
+    private async Task Grant(string name)
+    {
+        await Run(async () =>
+        {
+            var ok = await Fs.GrantAccessAsync(name);
+            _status = ok ? $"Granted access to /{name}." : $"Access to /{name} was not granted.";
+        });
+    }
+
+    private async Task Remove(string name)
+    {
+        await Run(async () => { await Fs.RemoveMountAsync(name); _status = $"Removed /{name}."; });
+    }
+
+    private async Task TogglePersist(string name, bool on)
+    {
+        await Run(async () =>
+        {
+            await Fs.SetPersistAsync(name, on);
+            _status = on ? $"Persisting /{name} across reloads." : $"Stopped persisting /{name}.";
+        });
+    }
+
+    private async Task Run(Func<Task> action)
+    {
+        if (_busy) return;
+        _busy = true;
+        try { await action(); }
+        catch (Exception ex) { _status = ex.Message; }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    protected override void OnDispose() => Fs.OnChanged -= OnFsChanged;
+}
