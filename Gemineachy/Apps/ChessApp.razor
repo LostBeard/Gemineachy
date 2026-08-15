@@ -1,0 +1,7 @@
+@using Gemineachy.Desktop
+@using Gemineachy.Games
+@attribute [App(Name = "Chess", Icon = "♞", Pinned = true, SingleInstance = true, Description = "Play chess against Gemini")]
+@inherits AppBase
+
+@* Thin app shell around the chess game. The board registers/unregisters its Gemini tools on mount/unmount. *@
+<ChessBoard />

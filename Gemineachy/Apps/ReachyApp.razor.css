@@ -1,0 +1,72 @@
+.reachy-app {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 460px;
+    font-family: sans-serif;
+    color: #eee;
+    padding: 4px 2px;
+}
+
+.reachy-section { display: flex; flex-direction: column; gap: 8px; }
+.reachy-title { font-weight: bold; font-size: 0.95rem; color: #ddd; }
+.reachy-empty { color: #999; font-size: 0.85rem; font-style: italic; }
+
+.robot-card {
+    background: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.robot-head { display: flex; align-items: center; gap: 8px; }
+.robot-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.robot-dot.on { background: #43a047; box-shadow: 0 0 6px #43a047; }
+.robot-dot.off { background: #777; }
+.robot-name { font-weight: bold; }
+.robot-origin { color: #9aa; font-size: 0.8rem; }
+.robot-status { color: #bbb; font-size: 0.8rem; margin-left: auto; }
+
+.robot-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.ctrl-sep { width: 1px; height: 20px; background: #444; margin: 0 3px; }
+
+.reachy-btn {
+    padding: 5px 10px;
+    font-size: 0.85rem;
+    background: #383838;
+    color: #eee;
+    border: 1px solid #4a4a4a;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.reachy-btn:hover { background: #464646; border-color: #7b61ff; }
+.reachy-btn.add { background: #4a3f8a; border-color: #7b61ff; }
+.reachy-btn.remove { margin-left: auto; padding: 3px 8px; background: #522; border-color: #733; }
+
+.robot-note { color: #d0a24a; font-size: 0.78rem; }
+
+.reachy-add { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.reachy-input {
+    padding: 6px 8px;
+    background: #1f1f1f;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+.reachy-input.name { width: 110px; }
+.reachy-input.host { flex: 1 1 160px; }
+.reachy-input.port { width: 64px; }
+
+.reachy-statusline { color: #9c86ff; font-size: 0.82rem; }
+
+.reachy-activity { display: flex; flex-direction: column; gap: 3px; }
+.activity-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+.activity-tool { color: #9c86ff; font-weight: bold; min-width: 84px; }
+.activity-robot { color: #9aa; min-width: 60px; }
+.activity-result { color: #ccc; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-time { color: #777; }
+.reachy-footer { color: #888; font-size: 0.78rem; border-top: 1px solid #333; padding-top: 8px; }

@@ -1,0 +1,167 @@
+.chess-container {
+    position: relative; /* anchor the promotion-picker overlay */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: sans-serif;
+    gap: 15px;
+    width: 480px; /* 8 * 60px - status text never resizes the panel */
+    box-sizing: content-box;
+}
+
+.status-banner {
+    font-size: 1.05rem;
+    font-weight: bold;
+    color: #eee;
+    text-align: center;
+    width: 100%;
+    height: 2.6em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1.25;
+    overflow: hidden;
+}
+
+.status-banner.game-over {
+    color: #ffd54f;
+    font-size: 1.3rem;
+}
+
+.thinking {
+    color: #9c86ff;
+    font-weight: normal;
+    font-style: italic;
+}
+
+.chess-footer {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.hint {
+    color: #bbb;
+    font-size: 0.85rem;
+}
+
+.board-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 60px);
+    grid-template-rows: repeat(8, 60px);
+    border: 4px solid #333;
+    border-radius: 4px;
+}
+
+.square {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.light-square { background-color: #f0d9b5; }
+.dark-square  { background-color: #b58863; }
+
+.square.selected { background-color: #7b61ff !important; }
+
+/* Legal-destination highlight (outline) for the selected piece's moves */
+.square.target { box-shadow: inset 0 0 0 3px rgba(123, 97, 255, 0.9); }
+.square.target:hover { background-color: #9c86ff !important; }
+
+/* Dot on an empty legal destination */
+.move-hint {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background-color: rgba(123, 97, 255, 0.55);
+}
+
+/* Ring around a capturable piece on a legal destination */
+.capture-ring {
+    position: absolute;
+    inset: 4px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 3px rgba(123, 97, 255, 0.85);
+    pointer-events: none;
+}
+
+.piece {
+    font-size: 42px;
+    line-height: 1;
+    user-select: none;
+    z-index: 1;
+}
+
+/* Solid glyphs colored per side, with an outline for contrast on both square colors. */
+.white-piece {
+    color: #fafafa;
+    text-shadow: 0 0 1px #000, 1px 1px 1px rgba(0,0,0,0.7), -1px -1px 1px rgba(0,0,0,0.5);
+}
+
+.black-piece {
+    color: #1a1a1a;
+    text-shadow: 0 0 1px #000, 0 0 2px rgba(255,255,255,0.35);
+}
+
+.reset-btn {
+    padding: 8px 16px;
+    font-size: 1rem;
+    background-color: #333;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.reset-btn:hover { background-color: #555; }
+
+/* Promotion picker overlay (covers the container; click outside cancels) */
+.promo-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+}
+
+.promo-picker {
+    background: #2a2a2a;
+    border: 2px solid #7b61ff;
+    border-radius: 8px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+.promo-title {
+    color: #eee;
+    font-weight: bold;
+    font-size: 0.95rem;
+}
+
+.promo-choices { display: flex; gap: 8px; }
+
+.promo-btn {
+    width: 56px;
+    height: 56px;
+    font-size: 38px;
+    line-height: 1;
+    background: #3a3a3a;
+    border: 2px solid #555;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.promo-btn:hover { background: #4a4a4a; border-color: #7b61ff; }

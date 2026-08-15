@@ -1,0 +1,135 @@
+@using Gemineachy.Desktop
+@using Gemineachy.Services.Reachy
+@attribute [App(Name = "Reachy", Icon = "🤖", Pinned = true, SingleInstance = true, Description = "Connect and control Reachy Mini robots")]
+@inherits AppBase
+@inject ReachyService Reachy
+
+<div class="reachy-app">
+    <div class="reachy-section">
+        <div class="reachy-title">Robots</div>
+        @if (Reachy.Robots.Count == 0)
+        {
+            <div class="reachy-empty">No robots configured. Add one below - the default Reachy Mini is at reachy-mini.local.</div>
+        }
+        else
+        {
+            @foreach (var r in Reachy.Robots)
+            {
+                <div class="robot-card">
+                    <div class="robot-head">
+                        <span class="robot-dot @(r.Online ? "on" : "off")"></span>
+                        <span class="robot-name">@r.Name</span>
+                        <span class="robot-origin">@r.Origin</span>
+                        <span class="robot-status">@r.Status</span>
+                        <button class="reachy-btn remove" @onclick="() => Remove(r.Name)">✕</button>
+                    </div>
+                    <div class="robot-controls">
+                        <button class="reachy-btn" @onclick="() => Do(() => Reachy.RefreshStatusAsync(r.Name))">Status</button>
+                        <button class="reachy-btn" @onclick="() => Do(() => Reachy.ManualWakeAsync(r.Name))">Wake</button>
+                        <button class="reachy-btn" @onclick="() => Do(() => Reachy.ManualSleepAsync(r.Name))">Sleep</button>
+                        <button class="reachy-btn" @onclick="() => Do(() => Reachy.ManualStopAsync(r.Name))">Stop</button>
+                        <button class="reachy-btn" title="Enable motors (required to move)" @onclick="() => Do(() => Reachy.ManualMotorsAsync(r.Name, true))">⚡On</button>
+                        <button class="reachy-btn" title="Rest to sleep pose, then disable motors (safe limp - won't drop)" @onclick="() => Do(() => Reachy.ManualMotorsAsync(r.Name, false))">⚡Off</button>
+                        <span class="ctrl-sep"></span>
+                        <button class="reachy-btn" title="Look up" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0.3, 0))">↑</button>
+                        <button class="reachy-btn" title="Look down" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, -0.3, 0))">↓</button>
+                        <button class="reachy-btn" title="Look left" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0, 0.4))">←</button>
+                        <button class="reachy-btn" title="Look right" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0, -0.4))">→</button>
+                        <button class="reachy-btn" title="Center head" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0, 0))">◎</button>
+                        <button class="reachy-btn" title="Wiggle antennas" @onclick="() => Do(() => Reachy.ManualAntennasAsync(r.Name, 0.8, 0.8))">📡</button>
+                    </div>
+                    @if (ReachyService.NeedsHostPermission(r.Host))
+                    {
+                        <div class="robot-note">IP/custom host - if commands fail, the extension may need host access granted for @r.Origin.</div>
+                    }
+                </div>
+            }
+        }
+    </div>
+
+    <div class="reachy-add">
+        <input class="reachy-input name" placeholder="name (optional)" @bind="_name" @bind:event="oninput" />
+        <input class="reachy-input host" placeholder="reachy-mini.local or 192.168.1.x" @bind="_host" @bind:event="oninput" />
+        <input class="reachy-input port" placeholder="8000" @bind="_port" @bind:event="oninput" />
+        <button class="reachy-btn add" @onclick="Add" disabled="@_busy">+ Add robot</button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_status))
+    {
+        <div class="reachy-statusline">@_status</div>
+    }
+
+    <div class="reachy-section">
+        <div class="reachy-title">Recent agent activity</div>
+        @if (Reachy.RecentActions.Count == 0)
+        {
+            <div class="reachy-empty">Nothing yet. When Gemini drives a robot (WakeUp, MoveHead, …) it appears here.</div>
+        }
+        else
+        {
+            <div class="reachy-activity">
+                @foreach (var a in Reachy.RecentActions.Take(8))
+                {
+                    <div class="activity-row">
+                        <span class="activity-tool">@a.Tool</span>
+                        <span class="activity-robot">@a.Robot</span>
+                        <span class="activity-result">@a.Result</span>
+                        <span class="activity-time">@a.Time.ToString("HH:mm:ss")</span>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="reachy-footer">Gemini can drive these robots with the Reachy tools · a shared robot is a machine-to-machine bridge</div>
+</div>
+
+@code {
+    private bool _busy;
+    private string? _status;
+    private string _name = "";
+    private string _host = "reachy-mini.local";
+    private string _port = "8000";
+
+    protected override async Task OnInitializedAsync()
+    {
+        Reachy.OnChanged += OnChanged;
+        await Reachy.Ready;
+        await Reachy.RefreshStatusAsync();
+        // Opening the Reachy app signals intent to control robots, so let Gemini know it can (introduces
+        // the tool manifest the first time).
+        await Reachy.AnnounceRobotsAsync();
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task Add()
+    {
+        await Run(async () =>
+        {
+            int port = int.TryParse(_port, out var p) ? p : 8000;
+            _status = await Reachy.AddRobotAsync(_name, _host, port);
+            _name = "";
+        });
+    }
+
+    private async Task Remove(string name) => await Run(async () =>
+    {
+        await Reachy.RemoveRobotAsync(name);
+        _status = $"Removed '{name}'.";
+    });
+
+    // Manual control buttons: fire the action and surface any failure in the status line.
+    private async Task Do(Func<Task> action) => await Run(action);
+
+    private async Task Run(Func<Task> action)
+    {
+        if (_busy) return;
+        _busy = true;
+        try { await action(); }
+        catch (Exception ex) { _status = ex.Message; }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    protected override void OnDispose() => Reachy.OnChanged -= OnChanged;
+}

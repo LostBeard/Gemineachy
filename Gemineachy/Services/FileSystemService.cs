@@ -78,7 +78,67 @@ namespace Gemineachy.Services
             // Restore persisted mounts (permissions come back as "prompt" until a user gesture re-grants).
             try { await RestorePersistedMountsAsync(); }
             catch (Exception ex) { Console.WriteLine($"[FS] restore failed: {ex.Message}"); }
+#pragma warning disable CS0162 // unreachable when the flag is off
+            if (RunFsSelfTest) { try { await RunFsSelfTestAsync(); } catch (Exception ex) { await ReportSelfTest($"THREW {ex.GetType().Name}: {ex.Message}"); } }
+#pragma warning restore CS0162
         }
+
+        // --- Dev self-test (Rule 5c): exercises the real WriteFile/SearchContent/EditFile/ReadFile tool
+        //     paths - which read file content JS-side via Blob.TextAsString() (a held JS String) - against
+        //     OPFS, with no Gemini dependency, and reports PASS/FAIL to a page DOM attribute so CDP can
+        //     read it. This is the path that hung on the OLD SpawnJS; it proves the rebuilt SpawnJS.
+        //     PROVEN PASS on SpawnJS 2.0.5 (2026-08-15): search+edit+read all green via the held-String
+        //     path. Left dormant (flip to true to re-verify after any SpawnJS/marshaller change). ---------
+        private const bool RunFsSelfTest = false;
+
+        private Task ReportSelfTest(string msg)
+        {
+            Console.WriteLine($"[FSTEST] {msg}");
+            try
+            {
+                using var document = _js.Get<Document>("document");
+                using var docEl = document.DocumentElement!;
+                docEl.SetAttribute("data-gem-fstest", msg);
+            }
+            catch (Exception ex) { Console.WriteLine($"[FSTEST] could not write DOM marker: {ex.Message}"); }
+            return Task.CompletedTask;
+        }
+
+        private async Task RunFsSelfTestAsync()
+        {
+            // Ensure an OPFS mount to test against (use an existing one, else create it).
+            var mount = _mounts.FirstOrDefault(m => m.Kind == "opfs");
+            if (mount == null)
+            {
+                await AddOpfsMountAsync("opfs");
+                mount = _mounts.FirstOrDefault(m => m.Kind == "opfs");
+            }
+            if (mount == null) { await ReportSelfTest("FAIL: no OPFS mount available"); return; }
+
+            var dir = $"/{mount.Name}";
+            var path = $"{dir}/__gem_fstest__.txt";
+            var content = "alpha line\nBETA has a needle here\ngamma also needle\ndelta clean\n";
+
+            var w = await WriteFile(path, content);
+            if (!w.StartsWith("Wrote")) { await ReportSelfTest($"FAIL WriteFile: {w}"); return; }
+
+            // SearchContent + EditFile + ReadFile all read the file JS-side via Blob.TextAsString().
+            var s = await SearchContent(dir, "needle", "__gem_fstest__.txt");
+            bool searchOk = s.Contains("2 match");
+
+            var e = await EditFile(path, "BETA has a needle here", "BETA replaced");
+            bool editOk = e.Contains("replaced 1");
+
+            var r = await ReadFile(path);
+            bool readOk = r.Contains("BETA replaced") && r.Contains("gamma also needle");
+
+            await Delete(path);
+
+            var verdict = (searchOk && editOk && readOk) ? "PASS" : "FAIL";
+            await ReportSelfTest($"{verdict} search={searchOk} edit={editOk} read={readOk} | search='{Trunc(s)}' edit='{Trunc(e)}'");
+        }
+
+        private static string Trunc(string s) => s.Length <= 80 ? s.Replace("\n", "\\n") : s.Substring(0, 80).Replace("\n", "\\n") + "…";
 
         // ---- Mount management (called from the Files app, always under a user gesture) ----------------
 

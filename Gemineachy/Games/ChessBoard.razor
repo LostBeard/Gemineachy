@@ -1,0 +1,256 @@
+@using Gemineachy.Games
+@using Gemineachy.Services
+@using System.Linq
+@inject GeminiChatService _geminiChatService
+@implements IAsyncDisposable
+
+<div class="chess-container">
+    <div class="status-banner @(Game.IsGameOver ? "game-over" : "")">
+        @if (Game.IsGameOver)
+        {
+            <span>@(Game.Winner is { } w ? (w == ChessColor.White ? "🏆 White wins!" : "🏆 Black wins!") : "½–½ " + Game.Outcome)</span>
+        }
+        else
+        {
+            <span>@Game.StatusMessage</span>
+        }
+        @if (_thinking)
+        {
+            <span class="thinking"> · Gemini is thinking…</span>
+        }
+    </div>
+    <div class="board-grid">
+        @for (int r = 0; r < 8; r++)
+        {
+            int row = r;
+            @for (int c = 0; c < 8; c++)
+            {
+                int col = c;
+                bool isLight = ChessGame.IsLight(row, col);
+                bool isSelected = Game.SelectedSquare?.Row == row && Game.SelectedSquare?.Col == col;
+                bool isTarget = _targets.Contains(row * 8 + col);
+                var piece = Game.Board[row, col];
+                bool occupied = !piece.IsNone;
+
+                <div class="@GetSquareClass(isLight, isSelected, isTarget)" @onclick="() => SquareClicked(row, col)">
+                    @if (occupied)
+                    {
+                        <div class="@GetPieceClass(piece)">@Glyph(piece.Kind)</div>
+                        @if (isTarget)
+                        {
+                            <div class="capture-ring"></div>
+                        }
+                    }
+                    else if (isTarget)
+                    {
+                        <div class="move-hint"></div>
+                    }
+                </div>
+            }
+        }
+    </div>
+    <div class="chess-footer">
+        <span class="hint">You are White · Gemini is Black</span>
+        <button class="reset-btn" @onclick="ResetGame">New Game</button>
+    </div>
+
+    @if (_showPromoPicker)
+    {
+        <div class="promo-overlay" @onclick="CancelPromotion">
+            <div class="promo-picker" @onclick:stopPropagation="true">
+                <div class="promo-title">Promote to:</div>
+                <div class="promo-choices">
+                    @foreach (var k in new[] { PieceKind.Queen, PieceKind.Rook, PieceKind.Bishop, PieceKind.Knight })
+                    {
+                        var kind = k;
+                        <button class="promo-btn white-piece" title="@kind" @onclick="() => ChoosePromotion(kind)">@Glyph(kind)</button>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private ChessGame Game = new();
+    private HashSet<int> _targets = new();   // squares to highlight (r*8+c)
+    private bool _thinking;                   // Gemini turn in flight
+    private bool _promptInFlight;             // guard against re-entrant prompts
+    private int _lastPromptedPly = -1;
+    private bool _announcedOver;
+    private bool _showPromoPicker;                                 // promotion chooser is open
+    private (int fr, int fc, int tr, int tc)? _pendingPromo;       // the deferred promotion move
+
+    private void SquareClicked(int row, int col)
+    {
+        // The human only controls White, and only on White's turn while Gemini isn't moving.
+        if (Game.IsGameOver || Game.CurrentTurn != ChessColor.White || _thinking || _showPromoPicker) return;
+
+        // If a pawn is selected and this click completes a promotion, defer to the picker (don't auto-queen).
+        if (Game.SelectedSquare is { } sel && Game.IsPromotionMove(sel.Row, sel.Col, row, col))
+        {
+            _pendingPromo = (sel.Row, sel.Col, row, col);
+            _showPromoPicker = true;
+            StateHasChanged();
+            return;
+        }
+
+        Game.SelectSquare(row, col);
+        RefreshTargets();
+        StateHasChanged();
+    }
+
+    private void ChoosePromotion(PieceKind kind)
+    {
+        if (_pendingPromo is not { } p) { _showPromoPicker = false; return; }
+        _showPromoPicker = false;
+        _pendingPromo = null;
+        // Applies the move with the chosen piece; OnStateChanged drives the refresh + Gemini's turn.
+        Game.TryMove(p.fr, p.fc, p.tr, p.tc, kind);
+    }
+
+    private void CancelPromotion()
+    {
+        _showPromoPicker = false;
+        _pendingPromo = null;
+        StateHasChanged(); // keep the pawn selected so the user can pick a different destination
+    }
+
+    // Game context sent to Gemini. Shared by mount (as a tool-change delta) and "New Game" (a plain game
+    // message, no tool change) so the wording is identical.
+    private string GameSetupText =>
+        $"The user has challenged you to chess. The user plays White on a visual board; you play Black. White moves first, so wait for the user's first move - you'll receive the board state and a prompt when it's your turn. Move using the ChessBoard.Move tool with a move from the legal-move list in UCI notation (e.g. \"e7e5\", castling \"e8g8\", promotion \"e2e1q\"). After you move, reply with {ToolProtocol.HiddenResponseMarker} (a hidden empty reply) to keep the chat clean. If the user asks you to narrate or chat about the game, reply normally instead.";
+
+    private async Task ResetGame()
+    {
+        Game.InitializeBoard();
+        _lastPromptedPly = -1;
+        _announcedOver = false;
+        RefreshTargets();
+        // Tools are unchanged on reset - game context, not a tool change - so send a (hidden) game message.
+        await _geminiChatService.Query($"{ToolProtocol.GameMarker} A new chess game has started. {GameSetupText}");
+        StateHasChanged();
+    }
+
+    private void RefreshTargets() => _targets = Game.CurrentTurn == ChessColor.White && !Game.IsGameOver
+        ? Game.CurrentTargets().ToHashSet()
+        : new HashSet<int>();
+
+    private string GetSquareClass(bool isLight, bool isSelected, bool isTarget)
+    {
+        string cls = "square " + (isLight ? "light-square" : "dark-square");
+        if (isSelected) cls += " selected";
+        if (isTarget) cls += " target";
+        return cls;
+    }
+
+    private string GetPieceClass(Piece p) =>
+        "piece " + (p.Color == ChessColor.White ? "white-piece" : "black-piece");
+
+    private static string Glyph(PieceKind k) => k switch
+    {
+        PieceKind.King => "♚",
+        PieceKind.Queen => "♛",
+        PieceKind.Rook => "♜",
+        PieceKind.Bishop => "♝",
+        PieceKind.Knight => "♞",
+        PieceKind.Pawn => "♟",
+        _ => ""
+    };
+
+    bool _beenInit = false;
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_beenInit) return;
+        _beenInit = true;
+        Game.OnStateChanged += HandleGameStateChanged;
+        RefreshTargets();
+        // Register this instance's [AgentTool] methods, then tell Gemini what changed (first time: full
+        // manifest; otherwise just the added ChessBoard.* tools) plus the game setup.
+        _geminiChatService.Register(this);
+        await _geminiChatService.AnnounceToolChanges(GameSetupText);
+    }
+
+    // Fires on every engine state change. Can fire off the Blazor Dispatcher (Gemini's move applies from
+    // the tool-dispatch continuation), so marshal onto the Dispatcher before touching state / rendering.
+    private void HandleGameStateChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                RefreshTargets();
+                StateHasChanged();
+                await DriveGeminiTurn();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Chess] state-change handler error: {ex}");
+            }
+        });
+    }
+
+    private async Task DriveGeminiTurn()
+    {
+        if (_promptInFlight) return;
+
+        if (Game.IsGameOver)
+        {
+            if (_announcedOver) return;
+            _announcedOver = true;
+            _promptInFlight = true;
+            try
+            {
+                await _geminiChatService.Query(
+                    $"{ToolProtocol.GameMarker} Chess game over - {Game.Outcome}. Feel free to say GG to the user.",
+                    "chess-board.txt", Game.GetBoardStateText());
+            }
+            finally { _promptInFlight = false; }
+            return;
+        }
+
+        // Only prompt when it's Gemini's (Black's) turn, and only once per position.
+        if (Game.CurrentTurn != ChessColor.Black || _lastPromptedPly == Game.Ply) return;
+        _lastPromptedPly = Game.Ply;
+        _promptInFlight = true;
+        _thinking = true;
+        StateHasChanged();
+        try
+        {
+            await _geminiChatService.Query(
+                $"{ToolProtocol.GameMarker} Chess: it's your turn (Black). Make your move now with the ChessBoard.Move tool using a UCI move from the legal-move list in the board below. Then reply with {ToolProtocol.HiddenResponseMarker} to keep the chat clean, unless the user has asked you to narrate.",
+                "chess-board.txt", Game.GetBoardStateText());
+        }
+        finally
+        {
+            _promptInFlight = false;
+            _thinking = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>Tool: apply Black's move given in UCI notation ("e7e5", "e8g8", "e2e1q").</summary>
+    [AgentTool("Make your (Black's) chess move. Pass the move in UCI notation exactly as shown in the board's legal-move list: source square + destination square, e.g. \"e7e5\", castling as the king's two-square move \"e8g8\" (O-O) / \"e8c8\" (O-O-O), and promotion by appending the piece letter \"e2e1q\" (q/r/b/n). Returns the updated board (with the new legal-move list); if the move was illegal it says so - pick one from the listed legal moves.")]
+    string Move(string move)
+    {
+        if (string.IsNullOrWhiteSpace(move))
+            return "No move provided.\n" + Game.GetBoardStateText();
+        bool ok = Game.TryMoveUci(move);
+        // Move applied on the engine; the UI refresh happens via HandleGameStateChanged.
+        return (ok ? $"Move '{move}' accepted." : $"Illegal move '{move}'. Choose one from the legal moves listed below.")
+            + "\n" + Game.GetBoardStateText();
+    }
+
+    /// <summary>Tool: return the current board state text.</summary>
+    [AgentTool("Returns the current chess board as text: piece layout, FEN, whose turn it is, check status, and the legal moves in UCI notation.")]
+    string GetBoardState() => Game.GetBoardStateText();
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!_beenInit) return;
+        _beenInit = false;
+        Game.OnStateChanged -= HandleGameStateChanged;
+        _geminiChatService.Unregister(this);
+        await _geminiChatService.AnnounceToolChanges("The chess game was closed by the user.");
+    }
+}

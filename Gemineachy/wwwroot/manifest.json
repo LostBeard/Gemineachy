@@ -16,6 +16,9 @@
     "https://gemini.google.com/*",
     "http://*.local/*"
   ],
+  "optional_host_permissions": [
+    "http://*/*"
+  ],
   "content_scripts": [
     {
       "matches": [
