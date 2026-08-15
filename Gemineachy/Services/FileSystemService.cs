@@ -2,7 +2,6 @@ using SpawnDev;
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using JSString = SpawnDev.SpawnJS.JSObjects.String;   // JS String (held JS-side), vs System.String
-using JSArray = SpawnDev.SpawnJS.JSObjects.Array;     // JS Array, vs System.Array
 
 namespace Gemineachy.Services
 {

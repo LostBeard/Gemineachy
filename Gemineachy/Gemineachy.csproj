@@ -13,10 +13,8 @@
 		     main.classic.js (the background service worker loads it via importScripts). -->
 		<PackageReference Include="SpawnDev.SpawnJS.WebWorkers" Version="2.0.1" />
 		<PackageReference Include="SpawnDev.SpawnJS" Version="2.0.5" />
-		<PackageReference Include="SpawnDev.SpawnJS.BrowserExtension" Version="1.0.1" />
+		<PackageReference Include="SpawnDev.SpawnJS.BrowserExtension" Version="2.0.0" />
 		<PackageReference Include="SpawnDev.SpawnJS.RazorUI" Version="2.0.1" />
-		<!-- Direct ref for RazorRenderer 1.0.7 which exposes SpawnDomRenderer.OnAfterRenderAsync
-		     (RazorUI pulls 1.0.6 transitively; the added event is additive/binary-compatible). -->
 		<PackageReference Include="SpawnDev.SpawnJS.RazorRenderer" Version="2.0.1" />
 	</ItemGroup>
 
