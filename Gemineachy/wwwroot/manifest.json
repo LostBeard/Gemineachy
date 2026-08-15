@@ -1,7 +1,7 @@
 ﻿{
   "manifest_version": 3,
   "name": "Gemineachy",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Gemineachy acts as a secure, local bridge between the cloud chat interface and the user's local execution environment, hardware, and rendering engine to provide avatars and local tools.",
   "icons": {
     "128": "app/icon-128.png"

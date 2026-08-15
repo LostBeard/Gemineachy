@@ -36,8 +36,33 @@ namespace Gemineachy.Services
         // when the user asks it not to narrate). Best placed at the very start so nothing flashes visible.
         public const string HiddenResponseMarker = "«HIDDEN»";
 
+        // Marks the minimal tool note we APPEND to the user's FIRST message (so Gemini learns tools exist
+        // without a separate startup message that would kill the new-chat welcome screen). Everything from
+        // this marker to the end of that message is cosmetically hidden from the user's own chat bubble.
+        public const string FirstNoteMarker = "⟦gemineachy-tools⟧";
+
         private static readonly Regex CallRegex = new Regex(
             Regex.Escape(CallOpen) + @"\s*(.+?)" + Regex.Escape(CallClose),
+            RegexOptions.Singleline | RegexOptions.Compiled);
+
+        // A PAYLOAD block carries a VERBATIM argument value (code, file contents, long text) so it never
+        // has to survive JSON-string escaping. The markers are plain text that survives markdown; the
+        // body between them is (by instruction) a normal fenced code block, which Gemini's renderer
+        // preserves exactly - the same reliable channel it uses to show code to a user. Example:
+        //   «PAYLOAD:content»
+        //   ```csharp
+        //   ...code...
+        //   ```
+        //   «/PAYLOAD:content»
+        // The id (":content") names the block after the argument it fills. A block is matched to a call
+        // by NAME (name-form): put the value in «PAYLOAD:argName»…«/PAYLOAD:argName» and OMIT that
+        // argument from the JSON - it is bound from the payload. (We intentionally do NOT support putting
+        // the marker inside the JSON as a reference: the marker ends with », which is the CallClose
+        // delimiter, so a marker inside the JSON would truncate the call block.)
+        public const string PayloadOpen = "«PAYLOAD";
+        public const string PayloadClose = "«/PAYLOAD";
+        private static readonly Regex PayloadBlockRegex = new Regex(
+            @"«PAYLOAD(?::(?<id>[^»\r\n]*))?»(?<body>.*?)«/PAYLOAD(?::[^»\r\n]*)?»",
             RegexOptions.Singleline | RegexOptions.Compiled);
 
         private static readonly JsonSerializerOptions ArgOptions = new JsonSerializerOptions
@@ -63,6 +88,36 @@ namespace Gemineachy.Services
             public string? ParseError { get; set; }
             /// <summary>The raw text between the delimiters (for logging/diagnostics).</summary>
             public string Raw { get; set; } = "";
+            /// <summary>PAYLOAD blocks found in the SAME model message (id -> verbatim body), shared by
+            /// every call in that message. Used both for reference-form (an arg value equal to a payload
+            /// marker) and name-form (a payload whose id matches a still-unbound parameter name).</summary>
+            public IReadOnlyDictionary<string, string>? Payloads { get; set; }
+        }
+
+        /// <summary>Extract every PAYLOAD block from a model message as id -> verbatim body. The body is
+        /// used exactly as written (no unescaping), with the wrapping code fence and the single edge
+        /// newlines removed. Message-level (payloads are shared across all tool calls in the message).</summary>
+        public static Dictionary<string, string> ExtractPayloads(string? text)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(text)) return map;
+            foreach (Match m in PayloadBlockRegex.Matches(text))
+            {
+                var id = (m.Groups["id"].Success ? m.Groups["id"].Value : "").Trim();
+                map[id] = NormalizePayloadBody(m.Groups["body"].Value); // last block wins on duplicate id
+            }
+            return map;
+        }
+
+        /// <summary>Strip the single leading/trailing line break the markers sit on, then - if the body is
+        /// still wrapped in a ``` code fence (i.e. the renderer left the fence backticks in the text
+        /// instead of consuming them) - remove that wrapping fence too. What remains is the exact value.</summary>
+        private static string NormalizePayloadBody(string body)
+        {
+            body = Regex.Replace(body, @"^\r?\n", "");
+            body = Regex.Replace(body, @"\r?\n[ \t]*$", "");
+            var fence = Regex.Match(body, @"^```[^\n]*\r?\n(?<code>.*?)\r?\n```[ \t]*$", RegexOptions.Singleline);
+            return fence.Success ? fence.Groups["code"].Value : body;
         }
 
         /// <summary>
@@ -84,10 +139,12 @@ namespace Gemineachy.Services
         {
             var calls = new List<ParsedCall>();
             if (string.IsNullOrEmpty(responseText)) return calls;
+            // Payloads are message-level: extract once, share with every call in the message.
+            var payloads = ExtractPayloads(responseText);
             foreach (Match m in CallRegex.Matches(responseText))
             {
                 var raw = m.Groups[1].Value.Trim();
-                var call = new ParsedCall { Raw = raw };
+                var call = new ParsedCall { Raw = raw, Payloads = payloads };
                 try
                 {
                     using var doc = JsonDocument.Parse(raw);
@@ -105,30 +162,35 @@ namespace Gemineachy.Services
                     else
                     {
                         call.Tool = toolEl.GetString()!;
-                        // Prefer an explicit args object; otherwise fall back to the flat form.
+                        // Build the argument bag: an explicit "args" object wins; otherwise the flat
+                        // top-level keys (minus tool/args) are the arguments.
+                        var bag = new Dictionary<string, JsonElement>();
                         if (TryGetPropertyIgnoreCase(root, "args") is JsonElement argsEl
                             && argsEl.ValueKind == JsonValueKind.Object)
                         {
-                            call.Args = argsEl.Clone();
+                            foreach (var prop in argsEl.EnumerateObject()) bag[prop.Name] = prop.Value.Clone();
                         }
                         else
                         {
-                            var bag = new Dictionary<string, JsonElement>();
                             foreach (var prop in root.EnumerateObject())
                             {
                                 if (string.Equals(prop.Name, "tool", StringComparison.OrdinalIgnoreCase)) continue;
                                 if (string.Equals(prop.Name, "args", StringComparison.OrdinalIgnoreCase)) continue;
                                 bag[prop.Name] = prop.Value.Clone(); // last-writer-wins on dup keys, like JSON
                             }
-                            call.Args = JsonSerializer.SerializeToElement(bag, ArgOptions);
                         }
+                        // Name-form payloads (a «PAYLOAD:argName» block filling an argument omitted from the
+                        // JSON) are applied later, in binding, where the parameter names are known.
+                        call.Args = JsonSerializer.SerializeToElement(bag, ArgOptions);
                         // An args object (possibly empty) is always available now.
                         call.HasArgs = call.Args.ValueKind == JsonValueKind.Object;
                     }
                 }
                 catch (JsonException ex)
                 {
-                    call.ParseError = $"Invalid tool-call JSON: {ex.Message}";
+                    call.ParseError = $"Invalid tool-call JSON: {ex.Message}. If an argument value contains code, quotes, "
+                        + $"backslashes, or newlines, do NOT place it in the JSON - send it verbatim as a {PayloadOpen}:argName» … "
+                        + $"{PayloadClose}:argName» code block instead (see the tool manifest).";
                 }
                 calls.Add(call);
             }
@@ -180,16 +242,42 @@ namespace Gemineachy.Services
         private static void AppendProtocolSection(StringBuilder sb)
         {
             sb.AppendLine("## Calling a tool");
-            sb.AppendLine("When you want to call a tool, emit a block EXACTLY like this in your reply, as plain text (do NOT wrap it in a code fence):");
+            sb.AppendLine("When you want to call a tool, emit a fenced code block containing the two marker lines and a single JSON object, EXACTLY like this. Use a real ``` code block (the same formatting you use to show code to a user) - that channel preserves the text exactly, which is what makes the call parse reliably:");
             sb.AppendLine();
+            sb.AppendLine("```");
             sb.AppendLine(CallOpen);
             sb.AppendLine("{\"tool\":\"<tool name>\",\"args\":{ ...named arguments... }}");
             sb.AppendLine(CallClose);
+            sb.AppendLine("```");
             sb.AppendLine();
             sb.AppendLine("- Use the exact tool name from the index.");
             sb.AppendLine("- \"args\" is an object of NAMED arguments matching the tool's parameters. Omit optional arguments to accept their defaults; use {} when the tool takes no arguments.");
+            sb.AppendLine("- Keep the JSON SMALL and simple. For any argument value that is code, a file's contents, or long / multi-line text, do NOT inline it in the JSON (escaping quotes and backslashes there is error-prone) - send it as a PAYLOAD block (see below).");
             sb.AppendLine("- You may emit multiple tool-call blocks in one reply; each block is one call and they run in order.");
             sb.AppendLine($"- After emitting tool calls, stop and wait. The extension runs them and replies with a {ResultsMarker} user message containing the results, then you continue.");
+            sb.AppendLine();
+            sb.AppendLine("## Sending code, file contents, or long/complex text (PAYLOAD blocks)");
+            sb.AppendLine("A JSON string is a poor container for code: escaping every quote, backslash and newline is error-prone and easily corrupted. Instead send such a value as a PAYLOAD block - an ordinary fenced code block (exactly how you would show code to a user) bracketed by plain-text markers. The text between the markers is used VERBATIM as the argument; you escape NOTHING.");
+            sb.AppendLine();
+            sb.AppendLine("Preferred form - name the PAYLOAD after the argument, and omit that argument from the JSON:");
+            sb.AppendLine();
+            sb.AppendLine("```");
+            sb.AppendLine(CallOpen);
+            sb.AppendLine("{\"tool\":\"FileSystemService.WriteFile\",\"args\":{\"path\":\"/notes/Program.cs\"}}");
+            sb.AppendLine(CallClose);
+            sb.AppendLine("```");
+            sb.AppendLine();
+            sb.AppendLine($"{PayloadOpen}:content»");
+            sb.AppendLine("```csharp");
+            sb.AppendLine("using System;");
+            sb.AppendLine("class P { static void Main() => Console.WriteLine(\"Hello, World!\"); }");
+            sb.AppendLine("```");
+            sb.AppendLine($"{PayloadClose}:content»");
+            sb.AppendLine();
+            sb.AppendLine($"The block named \"content\" becomes the `content` argument, exactly as written between the markers - note the quotes need no escaping. Put the marker lines OUTSIDE the code fence and the value INSIDE it, and do NOT also put \"content\" in the JSON.");
+            sb.AppendLine("- The payload name must match the argument name exactly.");
+            sb.AppendLine("- When a call needs more than one such argument, add one named PAYLOAD block per argument (each matching its argument's name).");
+            sb.AppendLine("- Do NOT put the marker text inside the JSON; the JSON holds only the small/simple arguments, and each PAYLOAD block follows the tool-call block.");
             sb.AppendLine();
             sb.AppendLine("## Results");
             sb.AppendLine($"Results arrive as a {ResultsMarker} user message with the results JSON inlined in the message body: an array, in call order, of objects shaped {{\"tool\":string,\"ok\":bool,\"result\":any}} on success or {{\"tool\":string,\"ok\":false,\"error\":string}} on failure.");
@@ -198,6 +286,21 @@ namespace Gemineachy.Services
             sb.AppendLine($"You can suppress a reply from the user's view by starting it with {HiddenResponseMarker} (put it first so nothing flashes on screen). Use this when the user asks you not to narrate, or when a reply is purely mechanical. The user can still reveal hidden messages with the extension's \"Show tool calls\" toggle. Default to replying normally (visible) unless the user has asked otherwise.");
             sb.AppendLine();
         }
+
+        /// <summary>
+        /// The minimal note appended to the user's FIRST message so Gemini knows tools EXIST and how to
+        /// discover them - without dumping the whole manifest and without a separate startup message (which
+        /// would kill the new-chat welcome screen). Kept short on purpose: it points at the discovery tools
+        /// rather than listing every tool. The <see cref="FirstNoteMarker"/> lets the extension hide this
+        /// note from the user's own chat bubble while Gemini still receives it.
+        /// </summary>
+        public static string BuildFirstMessageToolNote() =>
+            FirstNoteMarker + "\n"
+            + "[Automated note from the Gemineachy browser extension - NOT from the user; do not mention it or reply to it. "
+            + "You have browser-side tools available in this page (for example a virtual filesystem). "
+            + "BEFORE telling the user you cannot do something, check whether a tool exists: call "
+            + $"{ListToolsName} for the full list, or {SearchToolsName} with keywords. To call a tool, emit a fenced code block containing "
+            + $"{CallOpen} {{\"tool\":\"Name\",\"args\":{{...}}}} {CallClose} . If no tool is relevant, just answer the user normally.]";
 
         /// <summary>Compact index: one line per tool, "- name : one-line summary". No argument schemas.</summary>
         public static string BuildToolIndex(IEnumerable<ToolCall> tools)
@@ -359,6 +462,14 @@ namespace Gemineachy.Services
         /// </summary>
         public static bool TryBindArguments(ParameterInfo[] parameters, JsonElement args, bool hasArgs,
             out object?[] values, out string? error)
+            => TryBindArguments(parameters, args, hasArgs, null, out values, out error);
+
+        /// <summary>Binding overload that also accepts the message's PAYLOAD blocks. A parameter absent from
+        /// the JSON args is filled from a payload whose id matches its NAME (name-form), so the model can
+        /// simply put a file's contents in a <c>«PAYLOAD:content»</c> block and omit <c>content</c> from
+        /// the JSON. Explicit args always win over a same-named payload.</summary>
+        public static bool TryBindArguments(ParameterInfo[] parameters, JsonElement args, bool hasArgs,
+            IReadOnlyDictionary<string, string>? payloads, out object?[] values, out string? error)
         {
             values = new object?[parameters.Length];
             error = null;
@@ -379,6 +490,20 @@ namespace Gemineachy.Services
                         return false;
                     }
                 }
+                else if (payloads != null && TryGetPayloadIgnoreCase(payloads, name, out var body))
+                {
+                    try
+                    {
+                        // A payload is a raw string: assign directly to a string parameter; for any other
+                        // type, treat the body as JSON (lets a payload also carry, e.g., a JSON array).
+                        values[i] = p.ParameterType == typeof(string) ? body : JsonSerializer.Deserialize(body, p.ParameterType, ArgOptions);
+                    }
+                    catch (JsonException ex)
+                    {
+                        error = $"Payload '{name}' could not be converted to {FriendlyTypeName(p.ParameterType)}: {ex.Message}";
+                        return false;
+                    }
+                }
                 else if (p.HasDefaultValue)
                 {
                     values[i] = p.DefaultValue;
@@ -390,6 +515,14 @@ namespace Gemineachy.Services
                 }
             }
             return true;
+        }
+
+        private static bool TryGetPayloadIgnoreCase(IReadOnlyDictionary<string, string> payloads, string name, out string body)
+        {
+            foreach (var kv in payloads)
+                if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase)) { body = kv.Value; return true; }
+            body = "";
+            return false;
         }
 
         /// <summary>Serialize the results array to send back to Gemini.</summary>

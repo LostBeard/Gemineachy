@@ -48,6 +48,14 @@ namespace Gemineachy.Services
         private TaskCompletionSource _busyTask = new TaskCompletionSource();
         private ActionCallback? _mutationCallback;
         private SemaphoreSlim _queryLock = new SemaphoreSlim(1);
+        // Capture-phase listeners that intercept the user's FIRST send. Their ONLY job is to re-route the
+        // user's message through Query() (which is where the tool note is actually attached - so the same
+        // note also rides any FIRST message our own code / a cron job sends). Guard against double events.
+        private Callback? _firstKeydownCallback;
+        private Callback? _firstClickCallback;
+        private bool _firstSendHandled;
+        const string ComposeBoxSelector = "div[contenteditable=\"true\"]";
+        const string SendButtonMatch = "button[aria-label*=\"Send\"]";
 
         public Dictionary<string, ToolCall> Tools = new Dictionary<string, ToolCall>();
         private async Task InitAsync()
@@ -88,6 +96,16 @@ namespace Gemineachy.Services
                     {
                         Console.WriteLine($"Could not register {ex.ToString()}");
                     }
+
+                    // Intercept the user's FIRST send (Enter or the Send button) in the CAPTURE phase, so we
+                    // run before Gemini's own send handler. On that first send we append a minimal note telling
+                    // Gemini the tools exist + how to discover them, then re-send. This informs Gemini without a
+                    // separate startup message (which used to kill the new-chat welcome screen). The listeners
+                    // are cheap no-ops once the tools have been introduced.
+                    _firstKeydownCallback = Callback.Create((KeyboardEvent e) => OnFirstSendKeydown(e));
+                    _firstClickCallback = Callback.Create((MouseEvent e) => OnFirstSendClick(e));
+                    _document.AddEventListener("keydown", _firstKeydownCallback, true);
+                    _document.AddEventListener("click", _firstClickCallback, true);
 
                     // Send the manifest AFTER the UI has rendered, not as part of Ready. The renderer
                     // starts only once every IAsyncBackgroundService.Ready has completed, so blocking
@@ -210,6 +228,31 @@ namespace Gemineachy.Services
                         || text.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal))
                     {
                         uq.SetAttribute(ToolTrafficAttr, "");
+                    }
+                }
+            }
+            // First-message tool note: the appended note lives in the SAME user-query as the user's own
+            // text, so we can't hide the whole element. Instead hide only the note lines (from the marker
+            // to the end), leaving the user's message visible. Idempotent (re-applied on every mutation,
+            // which also re-hides if Angular re-renders the paragraphs).
+            var firstNoteQueries = _document
+                .QuerySelectorAll<HTMLElement>("chat-window user-query")
+                .Using(o => o.ToArray());
+            foreach (var uq in firstNoteQueries)
+            {
+                using (uq)
+                {
+                    if ((uq.TextContent ?? "").IndexOf(ToolProtocol.FirstNoteMarker, StringComparison.Ordinal) < 0) continue;
+                    var lines = uq.QuerySelectorAll<HTMLElement>("p.query-text-line").Using(o => o.ToArray());
+                    var hiding = false;
+                    foreach (var p in lines)
+                    {
+                        using (p)
+                        {
+                            if (!hiding && (p.TextContent ?? "").IndexOf(ToolProtocol.FirstNoteMarker, StringComparison.Ordinal) >= 0)
+                                hiding = true;
+                            if (hiding) p.SetAttribute(ToolTrafficAttr, "");
+                        }
                     }
                 }
             }
@@ -406,6 +449,7 @@ namespace Gemineachy.Services
             _announcedTools.Clear();
             foreach (var n in Tools.Keys) _announcedTools.Add(n);
             _protocolIntroduced = true;
+            RemoveFirstSendHooks(); // full manifest introduced this way; the first-message note is not needed
             await Query(header, ToolProtocol.ManifestFileName, manifest);
         }
         /// <summary>
@@ -450,6 +494,84 @@ namespace Gemineachy.Services
             }
             await Query($"{ToolProtocol.ManifestMarker} {note}");
         }
+
+        // ---- First-send tool note ---------------------------------------------------------------------
+
+        /// <summary>Capture-phase keydown hook: on the user's first Enter-send (before tools have been
+        /// introduced), re-route the message through Query so the tool note gets attached. Else ignore.</summary>
+        private void OnFirstSendKeydown(KeyboardEvent e)
+        {
+            try
+            {
+                if (_protocolIntroduced || _firstSendHandled) return;
+                if (e.Key != "Enter" || e.ShiftKey) return; // Shift+Enter = newline, not send
+                using var target = e.TargetAs<Element>();
+                using var box = target?.Closest<Element>(ComposeBoxSelector);
+                if (box == null) return; // not typing in the compose box
+                InterceptFirstSend(e);
+            }
+            catch (Exception ex) { Console.WriteLine($"[Gemineachy] first-send keydown hook: {ex.Message}"); }
+        }
+
+        /// <summary>Capture-phase click hook: on the user's first click of the Send button (before tools
+        /// have been introduced), re-route the message through Query so the tool note gets attached.</summary>
+        private void OnFirstSendClick(MouseEvent e)
+        {
+            try
+            {
+                if (_protocolIntroduced || _firstSendHandled) return;
+                using var target = e.TargetAs<Element>();
+                using var btn = target?.Closest<Element>(SendButtonMatch);
+                if (btn == null) return; // not the Send button
+                InterceptFirstSend(e);
+            }
+            catch (Exception ex) { Console.WriteLine($"[Gemineachy] first-send click hook: {ex.Message}"); }
+        }
+
+        /// <summary>Block the native send and re-send the user's message through Query(). The note itself is
+        /// attached centrally in Query (see <see cref="MaybeAttachFirstToolNote"/>) so the exact same note
+        /// rides ANY first message - the user's, our own code's, or a future cron job's.</summary>
+        private void InterceptFirstSend(Event e)
+        {
+            using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
+            var userMsg = input?.TextContent?.Trim() ?? "";
+            if (string.IsNullOrEmpty(userMsg)) return; // nothing composed; let the native (no-op) send be
+            // Take over: stop Gemini's own send for this event, and guard against a racing second event.
+            _firstSendHandled = true;
+            e.StopImmediatePropagation();
+            e.PreventDefault();
+            _ = Query(userMsg); // Query attaches the tool note (first genuine turn) and marks introduced
+        }
+
+        /// <summary>On the FIRST genuine (non-plumbing) message to Gemini in this chat - whoever sends it -
+        /// append the minimal tool note so Gemini knows tools exist, and mark tools introduced. Plumbing
+        /// messages (manifest / tool-results / game prompts) are the tool system itself and are left alone.</summary>
+        private string MaybeAttachFirstToolNote(string text)
+        {
+            if (_protocolIntroduced || string.IsNullOrWhiteSpace(text)) return text;
+            var t = text.TrimStart();
+            if (t.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
+                || t.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal)
+                || t.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal))
+                return text; // plumbing - not a genuine user/agent turn
+            _protocolIntroduced = true;
+            _announcedTools.Clear();
+            foreach (var n in Tools.Keys) _announcedTools.Add(n);
+            RemoveFirstSendHooks();
+            return $"{text}\n\n{ToolProtocol.BuildFirstMessageToolNote()}";
+        }
+
+        private void RemoveFirstSendHooks()
+        {
+            try
+            {
+                if (_document == null) return;
+                if (_firstKeydownCallback != null) _document.RemoveEventListener("keydown", _firstKeydownCallback, true);
+                if (_firstClickCallback != null) _document.RemoveEventListener("click", _firstClickCallback, true);
+            }
+            catch { /* best effort */ }
+        }
+
         private void Mutation_Observed()
         {
             // Hide tool traffic first, on every mutation, so it never flashes visible while streaming.
@@ -598,7 +720,7 @@ namespace Gemineachy.Services
                 if (_lastRoundFailed && sig == _lastRoundSig)
                 {
                     _toolRounds++;
-                    await Query($"{ToolProtocol.ResultsMarker} That tool call is identical to the previous one, which failed with the same error - re-sending it will not change the result. Read the error above and change the call before retrying (check the tool name, the required argument names, and their values). Arguments may be passed either nested as {{\"tool\":\"Name\",\"args\":{{...}}}} or flat as {{\"tool\":\"Name\",\"argName\":value}}.");
+                    await Query($"{ToolProtocol.ResultsMarker} That tool call is identical to the previous one, which failed with the same error - re-sending it will not change the result. Read the error above and change the call before retrying (check the tool name, the required argument names, and their values). Arguments may be passed nested as {{\"tool\":\"Name\",\"args\":{{...}}}} or flat as {{\"tool\":\"Name\",\"argName\":value}}. If a value is code or long text, send it VERBATIM as a {ToolProtocol.PayloadOpen}:argName» … {ToolProtocol.PayloadClose}:argName» code block and omit it from the JSON.");
                     return;
                 }
                 _toolRounds++;
@@ -646,7 +768,7 @@ namespace Gemineachy.Services
             {
                 var method = tool.MethodInfo;
                 var parameters = method.GetParameters();
-                if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, out var argValues, out var bindError))
+                if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, call.Payloads, out var argValues, out var bindError))
                     return new ToolResult { Tool = call.Tool, Ok = false, Error = bindError };
                 var result = await InvokeMaybeAsync(tool, argValues, method.ReturnType);
                 Console.WriteLine($"Tool '{call.Tool}' invoked.");
@@ -802,6 +924,9 @@ namespace Gemineachy.Services
         {
             ArgumentNullException.ThrowIfNull(text);
             ArgumentNullException.ThrowIfNull(_document);
+            // First genuine turn (from anyone): append the minimal "tools exist" note so Gemini won't
+            // decline for lack of awareness. No-op on plumbing messages and after tools are introduced.
+            text = MaybeAttachFirstToolNote(text);
             if (string.IsNullOrEmpty(text) && (files == null || files.Count() == 0))
             {
                 // nothing to send.

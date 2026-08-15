@@ -469,6 +469,87 @@ namespace Gemineachy.Services
                  + report.ToString().TrimEnd() + (dryRun ? "\n\nRe-run with dryRun=false to apply." : "");
         }
 
+        [AgentTool("Make a precise edit to ONE text file: replace an EXACT literal substring `oldText` with `newText`. By default `oldText` must occur EXACTLY ONCE (it fails otherwise, so you never edit the wrong place - include enough surrounding context to make it unique); pass replaceAll=true to replace every occurrence. `oldText` is matched literally (NOT a regex) - prefer this over ReplaceInFiles for a single targeted change. The mount must have write access.")]
+        async Task<string> EditFile(string path, string oldText, string newText, bool replaceAll = false)
+        {
+            LogAccess("edit", path);
+            if (string.IsNullOrEmpty(oldText)) return "Provide the exact existing text to replace (oldText).";
+            if (!VirtualFilePath.TryNormalize(path, out var segs, out var err)) return err!;
+            if (VirtualFilePath.IsRoot(segs) || segs.Count < 2) return "Provide a file path like /mount/file.txt.";
+            var mount = FindMount(VirtualFilePath.Mount(segs));
+            if (mount == null) return $"No mount named '{VirtualFilePath.Mount(segs)}'. Call ListDirectory(\"/\").";
+            if (!await EnsureWritableAsync(mount)) return $"No write access to /{mount.Name}. Ask the user to grant write access in the Files app.";
+            var (file, ferr) = await ResolveFileAsync(segs, create: false);
+            if (file == null) return ferr!;
+            JSString? text = null;
+            try
+            {
+                RegExp re;
+                try { re = new RegExp(RegexEscape(oldText), "g"); }
+                catch (Exception ex) { return $"Could not build a matcher for oldText: {ex.Message}"; }
+                using (var f = await file.GetFile()) text = await f.TextAsString(); // content stays JS-side
+                int n;
+                using (var matches = text.Match(re)) n = matches?.Length ?? 0;
+                if (n == 0) return $"oldText was not found in {VirtualFilePath.ToDisplay(segs)}. It must match the file exactly (whitespace and case included).";
+                if (n > 1 && !replaceAll) return $"oldText occurs {n} times in {VirtualFilePath.ToDisplay(segs)}. Add surrounding context so it is unique, or pass replaceAll=true to replace all {n}.";
+                // Escape '$' so JS treats newText literally (otherwise $1/$&/$$ would expand in the replacement).
+                var repl = (newText ?? "").Replace("$", "$$");
+                using var updated = text.Replace(re, repl);
+                using var ws = await file.CreateWritable();
+                await ws.Truncate(0);
+                await ws.Write(updated);      // JS String ref - content never enters .NET
+                await ws.Close();
+                var count = replaceAll ? n : 1;
+                return $"Edited {VirtualFilePath.ToDisplay(segs)}: replaced {count} occurrence{(count == 1 ? "" : "s")} of oldText.";
+            }
+            catch (Exception ex) { return $"Could not edit {VirtualFilePath.ToDisplay(segs)}: {ex.Message}"; }
+            finally { text?.Dispose(); file.Dispose(); }
+        }
+
+        [AgentTool("Move or rename a text file: copies /from to /to (creating any parent folders) then deletes /from. Overwrites /to if it already exists. Works within a mount or across mounts; both must have write access. (Directories are not moved - move their files individually.)")]
+        async Task<string> Move(string fromPath, string toPath)
+        {
+            LogAccess("move", $"{fromPath} -> {toPath}");
+            if (!VirtualFilePath.TryNormalize(fromPath, out var fromSegs, out var e1)) return e1!;
+            if (!VirtualFilePath.TryNormalize(toPath, out var toSegs, out var e2)) return e2!;
+            if (VirtualFilePath.IsRoot(fromSegs) || fromSegs.Count < 2) return "Provide a source file path like /mount/file.txt.";
+            if (VirtualFilePath.IsRoot(toSegs) || toSegs.Count < 2) return "Provide a destination file path like /mount/newname.txt.";
+            if (VirtualFilePath.ToDisplay(fromSegs) == VirtualFilePath.ToDisplay(toSegs)) return "Source and destination are the same path.";
+            var fromMount = FindMount(VirtualFilePath.Mount(fromSegs));
+            var toMount = FindMount(VirtualFilePath.Mount(toSegs));
+            if (fromMount == null) return $"No mount named '{VirtualFilePath.Mount(fromSegs)}'.";
+            if (toMount == null) return $"No mount named '{VirtualFilePath.Mount(toSegs)}'.";
+            if (!await EnsureWritableAsync(fromMount)) return $"No write access to /{fromMount.Name} (needed to remove the source).";
+            if (!await EnsureWritableAsync(toMount)) return $"No write access to /{toMount.Name}.";
+            var (src, serr) = await ResolveFileAsync(fromSegs, create: false);
+            if (src == null) return serr!;
+            JSString? text = null;
+            try
+            {
+                using (var f = await src.GetFile()) text = await f.TextAsString(); // content stays JS-side
+                var (dst, derr) = await ResolveFileAsync(toSegs, create: true);
+                if (dst == null) return derr!;
+                try
+                {
+                    using var ws = await dst.CreateWritable();
+                    await ws.Truncate(0);
+                    await ws.Write(text);      // JS String ref - content never enters .NET
+                    await ws.Close();
+                }
+                finally { dst.Dispose(); }
+                // Remove the source only after the destination write succeeded.
+                var parentSegs = fromSegs.Take(fromSegs.Count - 1).ToList();
+                var name = VirtualFilePath.Name(fromSegs);
+                var (parent, owns, perr) = await ResolveDirectoryAsync(parentSegs, create: false);
+                if (parent == null) return $"Copied to {VirtualFilePath.ToDisplay(toSegs)}, but could not remove the source: {perr}";
+                try { await parent.RemoveEntry(name, false); }
+                finally { if (owns) parent.Dispose(); }
+                return $"Moved {VirtualFilePath.ToDisplay(fromSegs)} -> {VirtualFilePath.ToDisplay(toSegs)}.";
+            }
+            catch (Exception ex) { return $"Could not move {VirtualFilePath.ToDisplay(fromSegs)}: {ex.Message}"; }
+            finally { text?.Dispose(); src.Dispose(); }
+        }
+
         [AgentTool("Show a directory tree under `path` to `maxDepth` levels - a compact structural overview. Path '/' shows all mounts.")]
         async Task<string> Tree(string path = "/", int maxDepth = 3, int maxEntries = 300)
         {
@@ -566,6 +647,11 @@ namespace Gemineachy.Services
         /// <summary>Build a case-insensitive JS RegExp matching entry NAMES from a glob, or null if blank.</summary>
         private static RegExp? BuildNameRegex(string glob) =>
             string.IsNullOrWhiteSpace(glob) ? null : new RegExp(VirtualFilePath.GlobToRegex(glob), "i");
+
+        /// <summary>Escape a literal string so it can be used as a JS RegExp source that matches it verbatim
+        /// (used by EditFile to match oldText literally, not as a pattern).</summary>
+        private static string RegexEscape(string s) =>
+            System.Text.RegularExpressions.Regex.Replace(s, @"[.*+?^${}()|[\]\\]", "\\$&");
 
         // ---- Path resolution -------------------------------------------------------------------------
 
