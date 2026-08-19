@@ -104,10 +104,11 @@ namespace Gemineachy.Services.Reachy
 
                 var pipeline = new SpeechRecognitionPipeline(encoder, decoder, _accelerator, decoderWithPast)
                 {
-                    // Kept at 64 as a worst-case bound. With the KV cache a long utterance is no longer
-                    // quadratic, so this trims far less than it used to - raise it once the browser timing
-                    // is measured over real speech.
-                    MaxTokens = 64,
+                    // No app-side cap. The 64 here was a guard against the old quadratic decode, and it was
+                    // actively TRUNCATING - the shipped 46.9s fixture alone generates ~70 tokens, so the
+                    // self-test transcript was being cut mid-sentence and still reported PASS (it only
+                    // checks for one expected word). The pipeline now defaults to the model's real ceiling
+                    // (max_target_positions 448 minus the 4-token prompt) and stops on EOT as normal.
                 };
                 pipeline.LoadTokenizer(tokenizerJson);
                 _pipeline = pipeline;
@@ -217,6 +218,11 @@ namespace Gemineachy.Services.Reachy
                     using var document = _js.Get<Document>("document");
                     using var docEl = document.DocumentElement!;
                     docEl.SetAttribute("data-gem-sttdump", string.Join("\n", dump));
+                    // The status line truncates to 120 chars for the UI, which is not enough to tell a
+                    // COMPLETE transcript from one cut short by a token cap - the self-test only checks for
+                    // one expected word, so a truncated result still reported PASS. Publish the full text so
+                    // that is checkable from outside.
+                    docEl.SetAttribute("data-gem-stttext", outcome.Text ?? "");
                 }
                 catch (Exception ex) { Console.WriteLine($"[STT] dump marker failed: {ex.Message}"); }
 

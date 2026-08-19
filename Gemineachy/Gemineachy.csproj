@@ -17,7 +17,7 @@
 		<PackageReference Include="SpawnDev.Reachy" Version="0.1.0-local.9" />
 		<!-- Whisper speech-to-text, GPU-side, in-house: Rose's microphone is transcribed here rather than
 		     shipped to a cloud speech API. -->
-		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.1.2-local.11" />
+		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.1.2-local.12" />
 		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.8" />
 		<PackageReference Include="SpawnDev.SpawnJS.BrowserExtension" Version="2.1.1" />
 		<PackageReference Include="SpawnDev.SpawnJS.RazorUI" Version="2.1.1" />
