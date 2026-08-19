@@ -30,6 +30,9 @@ if (extensionMode == ExtensionMode.Background)
     // ...and the WebRTC signalling relay: the robot's signalling server is plain ws://, which an https
     // page cannot open (mixed content) but this worker can. Media still flows page <-> robot directly.
     builder.Services.AddSingleton<WsRelayBackgroundService>();
+    // Registered LAST and awaits both relays: it releases the events background.common.js held during the
+    // cold start, and doing that before every listener is attached is what broke the ws relay.
+    builder.Services.AddSingleton<StartupFinalizerBackgroundService>();
 }
 else
 {

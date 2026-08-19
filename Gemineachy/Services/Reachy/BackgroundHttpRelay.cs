@@ -133,9 +133,10 @@ namespace Gemineachy.Services.Reachy
             var runtime = _bes.Runtime;
             if (runtime == null) { Console.WriteLine("[ReachyRelay] no runtime in background"); return Task.CompletedTask; }
             runtime.OnMessage += OnMessage;
-            // Release any runtime.onMessage events background.common.js held while .NET was starting.
-            try { if (_js.Has("finalizeAsyncStartup")) _js.CallVoid("finalizeAsyncStartup"); }
-            catch (Exception ex) { Console.WriteLine($"[ReachyRelay] finalizeAsyncStartup: {ex.Message}"); }
+            // NOTE: finalizeAsyncStartup() is deliberately NOT called here. Releasing the held events the
+            // instant THIS listener attaches replays them before any later-starting background service has
+            // attached its own - which silently broke the ws relay on every cold start. It is now called by
+            // StartupFinalizerBackgroundService once every listener is ready.
             Console.WriteLine("[ReachyRelay] background relay listening");
             return Task.CompletedTask;
         }

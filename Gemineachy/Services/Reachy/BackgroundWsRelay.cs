@@ -141,8 +141,11 @@ namespace Gemineachy.Services.Reachy
             var runtime = _bes.Runtime;
             if (runtime == null) { Console.WriteLine("[ReachyWs] no runtime in background"); return Task.CompletedTask; }
             runtime.OnMessage += OnMessage;
-            // NOTE finalizeAsyncStartup() is called by HttpRelayBackgroundService; it is idempotent (it
-            // returns immediately once startup has been finalized) so it is not called a second time here.
+            // NOTE finalizeAsyncStartup() is called by StartupFinalizerBackgroundService AFTER this
+            // listener (and every other one) has attached. It used to be called by the HTTP relay the
+            // moment that relay was ready, which replayed a cold start's queued message before this
+            // listener existed - so ConnectAudio failed with "Receiving end does not exist" from a
+            // sleeping worker while the HTTP relay's own GetStatus worked fine.
             Console.WriteLine("[ReachyWs] background ws relay listening");
             return Task.CompletedTask;
         }
