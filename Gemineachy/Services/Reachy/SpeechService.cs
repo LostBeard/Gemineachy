@@ -95,14 +95,18 @@ namespace Gemineachy.Services.Reachy
                 var encoder = InferenceSession.CreateFromFile(_accelerator, encoderBytes);
                 var decoderBytes = await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "onnx/decoder_model.onnx");
                 var decoder = InferenceSession.CreateFromFile(_accelerator, decoderBytes);
+                // With-past decoder = O(n) decode instead of O(n^2). It is a separate ~113MB download, but
+                // OPFS-cached like the rest, so it costs one cold start and every utterance after is cheaper.
+                var withPastBytes = await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "onnx/decoder_with_past_model.onnx");
+                var decoderWithPast = InferenceSession.CreateFromFile(_accelerator, withPastBytes);
                 var tokenizerJson = System.Text.Encoding.UTF8.GetString(
                     await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "tokenizer.json"));
 
-                var pipeline = new SpeechRecognitionPipeline(encoder, decoder, _accelerator)
+                var pipeline = new SpeechRecognitionPipeline(encoder, decoder, _accelerator, decoderWithPast)
                 {
-                    // The decode loop re-feeds the WHOLE token sequence every step (no KV cache), so cost
-                    // grows quadratically and the 224 default can run for many minutes. A short utterance is
-                    // well under this; the cap bounds the worst case rather than trimming normal speech.
+                    // Kept at 64 as a worst-case bound. With the KV cache a long utterance is no longer
+                    // quadratic, so this trims far less than it used to - raise it once the browser timing
+                    // is measured over real speech.
                     MaxTokens = 64,
                 };
                 pipeline.LoadTokenizer(tokenizerJson);
