@@ -61,3 +61,13 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+###############################################################################
+# Test fixtures are compared byte-for-byte. `* text=auto` above relies on git's
+# binary sniffing; state it outright for audio/media so a fixture can never be
+# line-ending normalised. A mangled stt-harvard-8k.wav would not fail loudly -
+# it would come back as a mysterious transcription regression.
+###############################################################################
+*.wav  binary
+*.mp3  binary
+*.onnx binary

@@ -19,6 +19,15 @@ namespace Gemineachy.Services
         public const string CallOpen = "«TOOL_CALL"; // «TOOL_CALL
         public const string CallClose = "»";          // »
 
+        // ASCII fallback delimiters. The manifest only ever advertises the guillemet form (above), but
+        // Gemini sometimes substitutes ASCII angle brackets for the guillemets and emits
+        // <<TOOL_CALL {...}>> instead (observed live 2026-08-18). Same tolerance-not-contract stance as
+        // the flat argument bag in ParseCalls: refusing the call only burns a round-trip and the user's
+        // time, and the model does not reliably correct itself when told. An ASCII close is only honoured
+        // for an ASCII open, so a ">>" inside a guillemet call's JSON can never truncate it.
+        public const string CallOpenAscii = "<<TOOL_CALL";
+        public const string CallCloseAscii = ">>";
+
         // Sentinel that marks the user-side message carrying tool results back to Gemini.
         public const string ResultsMarker = "[TOOL_RESULTS]";
         public const string ResultsFileName = "tool-results.json";
@@ -41,9 +50,18 @@ namespace Gemineachy.Services
         // this marker to the end of that message is cosmetically hidden from the user's own chat bubble.
         public const string FirstNoteMarker = "⟦gemineachy-tools⟧";
 
+        // Two alternatives rather than one pattern with alternating delimiters, so an ASCII close only
+        // ever terminates an ASCII open (and vice versa). .NET allows the same group name in both.
         private static readonly Regex CallRegex = new Regex(
-            Regex.Escape(CallOpen) + @"\s*(.+?)" + Regex.Escape(CallClose),
+            "(?:" + Regex.Escape(CallOpen) + @"\s*(?<body>.+?)" + Regex.Escape(CallClose) + ")"
+            + "|(?:" + Regex.Escape(CallOpenAscii) + @"\s*(?<body>.+?)" + Regex.Escape(CallCloseAscii) + ")",
             RegexOptions.Singleline | RegexOptions.Compiled);
+
+        /// <summary>True if the text contains the start of a tool call in either delimiter form. Used by
+        /// the DOM hiding pass, which must hide an ASCII-delimited call just as it hides a guillemet one.</summary>
+        public static bool ContainsCallOpen(string? text) =>
+            text != null && (text.Contains(CallOpen, StringComparison.Ordinal)
+                             || text.Contains(CallOpenAscii, StringComparison.Ordinal));
 
         // A PAYLOAD block carries a VERBATIM argument value (code, file contents, long text) so it never
         // has to survive JSON-string escaping. The markers are plain text that survives markdown; the
@@ -114,8 +132,11 @@ namespace Gemineachy.Services
         /// instead of consuming them) - remove that wrapping fence too. What remains is the exact value.</summary>
         private static string NormalizePayloadBody(string body)
         {
-            body = Regex.Replace(body, @"^\r?\n", "");
-            body = Regex.Replace(body, @"\r?\n[ \t]*$", "");
+            body = Regex.Replace(body, @"\A\r?\n", "");
+            // \z (absolute end), NOT $ : $ also matches BEFORE a final newline, so on a body ending
+            // "}\n\n" both newlines matched and Replace stripped both - eating the file's own trailing
+            // newline along with the one the closing marker sits on. \z strips exactly the marker's.
+            body = Regex.Replace(body, @"\r?\n[ \t]*\z", "");
             var fence = Regex.Match(body, @"^```[^\n]*\r?\n(?<code>.*?)\r?\n```[ \t]*$", RegexOptions.Singleline);
             return fence.Success ? fence.Groups["code"].Value : body;
         }
@@ -143,7 +164,7 @@ namespace Gemineachy.Services
             var payloads = ExtractPayloads(responseText);
             foreach (Match m in CallRegex.Matches(responseText))
             {
-                var raw = m.Groups[1].Value.Trim();
+                var raw = m.Groups["body"].Value.Trim();
                 var call = new ParsedCall { Raw = raw, Payloads = payloads };
                 try
                 {

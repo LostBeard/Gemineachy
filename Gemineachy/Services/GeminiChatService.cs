@@ -68,6 +68,8 @@ namespace Gemineachy.Services
                 {
                     // inject the CSS that hides tool-traffic chat elements (revealed by ShowToolTraffic)
                     InjectToolTrafficStyle();
+                    // prove the message scrape still strips code-block chrome before we scrape anything
+                    RunScrapeSelfTest();
                     // ignore all existing messages
                     UpdateFromChat(true);
                     _mutationCallback = Callback.Create(Mutation_Observed);
@@ -266,7 +268,7 @@ namespace Gemineachy.Services
                 using (mr)
                 {
                     var text = mr.TextContent ?? "";
-                    if (text.Contains(ToolProtocol.CallOpen, StringComparison.Ordinal)
+                    if (ToolProtocol.ContainsCallOpen(text)
                         || text.Contains(ToolProtocol.HiddenResponseMarker, StringComparison.Ordinal))
                         mr.SetAttribute(ToolTrafficAttr, "");
                 }
@@ -651,7 +653,7 @@ namespace Gemineachy.Services
                             // tool-call parse and stalled the game while tool calls were hidden. Our
                             // delimiter-based parser («TOOL_CALL … ») does not need innerText's newlines.
                             using var contentNode = node.QuerySelector<HTMLElement>("model-response [id*='model-response-message-content']");
-                            var modelResponse = contentNode?.TextContent?.Trim() ?? "";
+                            var modelResponse = ReadMessageText(contentNode);
                             // (Hiding of tool-call responses happens in EarlyHideToolTraffic on every
                             // mutation, so the block is hidden while streaming - not only once complete.)
                             // handle tool calling
@@ -672,6 +674,106 @@ namespace Gemineachy.Services
                 _busyTask.TrySetResult();
                 OnStateChanged?.Invoke();
             }
+        }
+        /// <summary>
+        /// Read a model message as plain text, with every rendered code block reduced to the code itself.
+        /// </summary>
+        /// <remarks>
+        /// TextContent (not innerText) is required: by the time we parse, EarlyHideToolTraffic has often
+        /// set the element display:none, and innerText returns "" for a hidden element - which silently
+        /// blanked the tool-call parse and stalled the game. But raw TextContent also picks up a code
+        /// block's CHROME. Gemini renders one as
+        /// <c>&lt;code-block&gt;…&lt;div class="code-block-decoration"&gt;&lt;span&gt;C#&lt;/span&gt;…&lt;/div&gt;&lt;pre&gt;&lt;code&gt;…</c>,
+        /// and TextContent concatenates with no separator, so a C# block reads as "C#using System;…"
+        /// (CDP-verified 2026-08-18). That language label rode through the PAYLOAD channel and landed as
+        /// the first characters of files written by the FileSystem tools (TJ's bug report).
+        /// Fix: work on a DETACHED deep clone (never touch the live DOM the user is looking at) and
+        /// replace each code block wholesale with its &lt;pre&gt; text. Replacing the whole block - rather
+        /// than stripping a known header selector or the label text - drops every piece of chrome
+        /// (language label, copy/edit buttons, footer notices) no matter how Gemini restructures it, and
+        /// costs no correctness if it never changes. The surrounding newlines put the code on its own
+        /// lines, which TextContent's element-boundary-free concatenation would otherwise deny it.
+        /// </remarks>
+        private static string ReadMessageText(HTMLElement? contentNode)
+        {
+            if (contentNode == null) return "";
+            using var clone = contentNode.CloneNode<HTMLElement>(true);
+            var pres = clone.QuerySelectorAll<HTMLElement>("pre").Using(o => o.ToArray());
+            foreach (var pre in pres)
+            {
+                using (pre)
+                {
+                    var code = pre.TextContent ?? "";
+                    // Replace the whole <code-block> when there is one; a bare <pre> is its own block.
+                    using var block = pre.Closest<HTMLElement>("code-block");
+                    (block ?? pre).TextContent = "\n" + code + "\n";
+                }
+            }
+            return clone.TextContent?.Trim() ?? "";
+        }
+        /// <summary>Attribute on &lt;html&gt; carrying the scrape self-test verdict, so a CDP run can read it:
+        /// <c>document.documentElement.getAttribute('data-gem-scrapetest')</c>.</summary>
+        const string ScrapeTestAttr = "data-gem-scrapetest";
+        /// <summary>
+        /// Always-on regression guard for <see cref="ReadMessageText"/>. Builds a DETACHED replica of
+        /// Gemini's rendered code block (decoration header with the language label + button text, then
+        /// &lt;pre&gt;&lt;code&gt;) wrapped in PAYLOAD markers, scrapes it through the real production path, and
+        /// asserts the extracted payload is the code EXACTLY - no language label, no button text.
+        /// It costs a handful of detached nodes at startup and catches the day Gemini restructures its
+        /// code block and we start silently corrupting every file the agent writes.
+        /// </summary>
+        private void RunScrapeSelfTest()
+        {
+            var verdict = "SKIP";
+            try
+            {
+                const string code = "using System;\nConsole.WriteLine(\"Hello, \\\"World\\\"!\");\n";
+                using var host = BuildCodeBlockReplica(code);
+                var payloads = ToolProtocol.ExtractPayloads(ReadMessageText(host));
+                var got = payloads.TryGetValue("content", out var v) ? v : null;
+                verdict = got == code ? "PASS" : $"FAIL got={Escape(got)} want={Escape(code)}";
+            }
+            catch (Exception ex) { verdict = $"THREW {ex.GetType().Name}: {ex.Message}"; }
+            if (verdict != "PASS") Console.WriteLine($"[SCRAPETEST] {verdict}");
+            try
+            {
+                using var docEl = _document?.DocumentElement;
+                docEl?.SetAttribute(ScrapeTestAttr, verdict);
+            }
+            catch (Exception ex) { Console.WriteLine($"[SCRAPETEST] could not write DOM marker: {ex.Message}"); }
+        }
+        private static string Escape(string? s) => s == null ? "(none)" : "\"" + s.Replace("\n", "\\n") + "\"";
+        /// <summary>Build a detached copy of Gemini's code-block DOM (as observed 2026-08-18) between
+        /// PAYLOAD markers, for <see cref="RunScrapeSelfTest"/>. Built node-by-node rather than via
+        /// innerHTML so it cannot trip the page's Trusted Types policy.</summary>
+        private HTMLElement BuildCodeBlockReplica(string code)
+        {
+            var doc = _document!;
+            var host = doc.CreateElement<HTMLElement>("div");
+            using var open = doc.CreateElement<HTMLElement>("p");
+            open.TextContent = $"{ToolProtocol.PayloadOpen}:content»";
+            using var block = doc.CreateElement<HTMLElement>("code-block");
+            using var deco = doc.CreateElement<HTMLElement>("div");
+            deco.ClassName = "code-block-decoration header-formatted";
+            using var label = doc.CreateElement<HTMLElement>("span");
+            label.TextContent = "C#";               // the language label that leaked into written files
+            using var buttons = doc.CreateElement<HTMLElement>("div");
+            buttons.ClassName = "buttons";
+            buttons.TextContent = "content_copy";   // icon-ligature text, should never reach the payload
+            deco.AppendChild(label);
+            deco.AppendChild(buttons);
+            using var pre = doc.CreateElement<HTMLElement>("pre");
+            using var codeEl = doc.CreateElement<HTMLElement>("code");
+            codeEl.TextContent = code;
+            pre.AppendChild(codeEl);
+            block.AppendChild(deco);
+            block.AppendChild(pre);
+            using var close = doc.CreateElement<HTMLElement>("p");
+            close.TextContent = $"{ToolProtocol.PayloadClose}:content»";
+            host.AppendChild(open);
+            host.AppendChild(block);
+            host.AppendChild(close);
+            return host;
         }
         /// <summary>Max consecutive automatic tool rounds before we stop, to guard against a
         /// tool-call loop between the extension and Gemini. Reset by <see cref="ResetToolLoop"/>.</summary>

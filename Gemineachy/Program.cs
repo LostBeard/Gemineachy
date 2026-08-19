@@ -27,6 +27,9 @@ if (extensionMode == ExtensionMode.Background)
     // Background service worker: NO UI. Its only job is the HTTP relay so the content page (which is
     // CORS-blocked from the LAN daemon) can reach the Reachy Mini through the worker's host permissions.
     builder.Services.AddSingleton<HttpRelayBackgroundService>();
+    // ...and the WebRTC signalling relay: the robot's signalling server is plain ws://, which an https
+    // page cannot open (mixed content) but this worker can. Media still flows page <-> robot directly.
+    builder.Services.AddSingleton<WsRelayBackgroundService>();
 }
 else
 {
@@ -47,6 +50,7 @@ else
     // Phase-1 Reachy relay proof (writes data-reachy-probe to the DOM); flip its RunProbe const off later.
     builder.Services.AddSingleton<ReachyRelayProbe>();
     // Reachy robots: registers its always-available tools at startup and restores persisted robots.
+    builder.Services.AddSingleton<SpeechService>();
     builder.Services.AddSingleton<ReachyService>();
 
     // Windowed desktop environment + registered apps

@@ -35,9 +35,10 @@ namespace Gemineachy.Services.Reachy
 
         private async Task InitAsync()
         {
-#pragma warning disable CS0162
+#pragma warning disable CS0162 // RunProbe is a const false gate: the ENTIRE body below is
+                               // unreachable by design. The restore therefore belongs at the end
+                               // of the method - closing it after the guard suppressed nothing.
             if (!RunProbe) return;
-#pragma warning restore CS0162
             if (_bes.ExtensionMode != ExtensionMode.Content) return;
             await Task.Delay(2000);
             var log = new System.Text.StringBuilder();
@@ -77,6 +78,7 @@ namespace Gemineachy.Services.Reachy
                 docEl.SetAttribute("data-reachy-probe", report);
             }
             catch (Exception ex) { Console.WriteLine($"[ReachyProbe] DOM marker failed: {ex.Message}"); }
+#pragma warning restore CS0162
         }
 
         private static async Task<string> Try(Func<Task<string>> action)

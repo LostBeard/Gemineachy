@@ -32,6 +32,38 @@ namespace Gemineachy.Services.Reachy
     internal static class RelayProtocol
     {
         public const string HttpRelayType = "reachy-http-relay";
+
+        /// <summary>
+        /// Send a message to the background worker, retrying the one failure that means "the worker was
+        /// asleep" rather than "the worker is broken".
+        /// </summary>
+        /// <remarks>
+        /// An MV3 service worker is torn down when idle. Sending to it is what starts it again, but the
+        /// very first message can still land before .NET has booted far enough to register the listener,
+        /// and Chrome answers "Could not establish connection. Receiving end does not exist." That is
+        /// indistinguishable, at the call site, from a genuinely dead extension - so a robot control or an
+        /// audio link would simply fail the first time it was used after a quiet minute. Retrying gives the
+        /// worker the moment it needs to come up. Only THAT message is retried; a real error propagates
+        /// immediately rather than being tried three times.
+        /// </remarks>
+        public static async Task<string?> SendWithWakeRetryAsync(
+            SpawnDev.SpawnJS.BrowserExtension.Runtime runtime, string json, int attempts = 4)
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                try { return await runtime.SendMessage<string>(json); }
+                catch (Exception ex) when (attempt < attempts && IsWorkerAsleep(ex))
+                {
+                    // Back off a little further each time: cold-starting the WASM runtime is not instant.
+                    await Task.Delay(150 * attempt);
+                }
+            }
+        }
+
+        private static bool IsWorkerAsleep(Exception ex) =>
+            ex.Message.Contains("Receiving end does not exist", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("Could not establish connection", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("message port closed", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -51,7 +83,7 @@ namespace Gemineachy.Services.Reachy
             var req = new RelayRequest(RelayProtocol.HttpRelayType, request.Method.Method, request.RequestUri!.ToString(), body, contentType);
             var reqJson = JsonSerializer.Serialize(req, RelayJson.Default.RelayRequest);
 
-            var respJson = await runtime.SendMessage<string>(reqJson);
+            var respJson = await RelayProtocol.SendWithWakeRetryAsync(runtime, reqJson);
             if (string.IsNullOrEmpty(respJson))
                 throw new HttpRequestException("No response from background relay (is the extension background worker alive?).");
 

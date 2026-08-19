@@ -11,8 +11,14 @@
 	<ItemGroup>
 		<!-- Direct reference so this WASM app gets the SpawnJS.WebWorkers build targets that produce
 		     main.classic.js (the background service worker loads it via importScripts). -->
-		<PackageReference Include="SpawnDev.SpawnJS.WebWorkers" Version="2.1.2" />
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.7" />
+		<PackageReference Include="SpawnDev.SpawnJS.WebWorkers" Version="2.1.3-local.1" />
+		<!-- The Reachy client, GStreamer signalling protocol and RoseAudioLink now come from the real
+		     library instead of the verbatim copies this project carried; SpawnDev.RTC arrives with it. -->
+		<PackageReference Include="SpawnDev.Reachy" Version="0.1.0-local.9" />
+		<!-- Whisper speech-to-text, GPU-side, in-house: Rose's microphone is transcribed here rather than
+		     shipped to a cloud speech API. -->
+		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.1.2-local.10" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.8" />
 		<PackageReference Include="SpawnDev.SpawnJS.BrowserExtension" Version="2.1.1" />
 		<PackageReference Include="SpawnDev.SpawnJS.RazorUI" Version="2.1.1" />
 		<PackageReference Include="SpawnDev.SpawnJS.RazorRenderer" Version="2.1.1" />

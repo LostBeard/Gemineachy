@@ -93,6 +93,48 @@ namespace Gemineachy.Games
             OnStateChanged?.Invoke();
         }
 
+        /// <summary>
+        /// Set an arbitrary position - puzzle setup and unit tests. Takes 8 rows of 8 characters, row 0
+        /// first (Black's back rank, the row Red crowns on): '.' empty, 'r'/'b' men, 'R'/'B' kings.
+        /// History and game-over state are reset and the status line is re-evaluated for
+        /// <paramref name="turn"/>, so the position behaves exactly like one reached by playing to it.
+        /// </summary>
+        public void LoadPosition(IReadOnlyList<string> rows, Player turn)
+        {
+            if (rows == null || rows.Count != 8) throw new ArgumentException("Expected 8 rows.", nameof(rows));
+            for (int r = 0; r < 8; r++)
+            {
+                var row = rows[r];
+                if (row.Length != 8) throw new ArgumentException($"Row {r} must be 8 characters.", nameof(rows));
+                for (int c = 0; c < 8; c++)
+                {
+                    Board[r, c] = row[c] switch
+                    {
+                        'r' => PieceType.Red,
+                        'b' => PieceType.Black,
+                        'R' => PieceType.RedKing,
+                        'B' => PieceType.BlackKing,
+                        '.' or ' ' => PieceType.None,
+                        _ => throw new ArgumentException($"Unknown piece '{row[c]}' at row {r} col {c}.", nameof(rows)),
+                    };
+                    // Light squares are unplayable and their PDN numbers alias their dark neighbour's,
+                    // so a piece parked on one is silently unreachable. Reject it at load time.
+                    if (Board[r, c] != PieceType.None && !IsDark(r, c))
+                        throw new ArgumentException($"Piece '{row[c]}' at row {r} col {c} is on a light square.", nameof(rows));
+                }
+            }
+            MoveHistory.Clear();
+            _movePairCounter = 1;
+            _selectedPath.Clear();
+            SelectedSquare = null;
+            IsGameOver = false;
+            Winner = null;
+            Ply = 0;
+            CurrentTurn = turn;
+            EvaluateGameEndAndStatus();
+            OnStateChanged?.Invoke();
+        }
+
         #region Coordinate helpers
         public static bool IsDark(int row, int col) => (row + col) % 2 == 1;
         public static bool InBounds(int row, int col) => row >= 0 && row < 8 && col >= 0 && col < 8;

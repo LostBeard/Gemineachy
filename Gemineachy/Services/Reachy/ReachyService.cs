@@ -3,6 +3,8 @@ using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.SpawnJS.BrowserExtension.Services;
 using SpawnDev.Reachy;
+using SpawnDev.RTC;
+using SpawnDev.RTC.Browser;
 
 namespace Gemineachy.Services.Reachy
 {
@@ -20,6 +22,26 @@ namespace Gemineachy.Services.Reachy
         public string Origin => $"http://{Host}:{Port}";
         /// <summary>True when the host is an mDNS *.local name already covered by manifest host_permissions.</summary>
         public bool IsLocalName => Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Live WebRTC audio session, once connected. Signalling rides the background relay; the
+        /// media itself flows page &lt;-&gt; robot directly.</summary>
+        public RoseAudioLink? Audio { get; set; }
+        /// <summary>Hidden &lt;audio&gt; element playing the robot's microphone. The track is handed to the
+        /// element directly, so the audio is decoded and played by the browser and never enters .NET.</summary>
+        public HTMLAudioElement? AudioElement { get; set; }
+        /// <summary>Last audio-link state (a W3C peer-connection state, or an error).</summary>
+        public string AudioState { get; set; } = "";
+        public bool AudioConnected => Audio != null;
+        /// <summary>The page microphone stream while the user is talking to the robot, else null.</summary>
+        public IRTCMediaStream? MicStream { get; set; }
+        public bool MicSending => MicStream != null;
+        /// <summary>Shared gesture choreography, driving this robot's daemon through the HTTP relay.</summary>
+        public ReachyBody? Body { get; set; }
+        /// <summary>Rolling window of the robot's microphone while ears are on, so any recent moment can be
+        /// transcribed after the fact instead of having to be recorded on cue.</summary>
+        public PcmRing? Ears { get; set; }
+        public Action<short[]>? EarsSink { get; set; }
+        public bool EarsOn => Ears != null;
     }
 
     /// <summary>
@@ -35,6 +57,7 @@ namespace Gemineachy.Services.Reachy
         private readonly SpawnJSRuntime _js;
         private readonly GeminiChatService _gemini;
         private readonly BrowserExtensionService _bes;
+        private readonly SpeechService _speech;
         private readonly List<ReachyRobot> _robots = new();
 
         private const string DB_NAME = "gemineachy_reachy";
@@ -60,11 +83,12 @@ namespace Gemineachy.Services.Reachy
         /// <summary>Log a tool result and return it (so each [AgentTool] records what the agent did).</summary>
         private string Done(string tool, ReachyRobot r, string result) { LogAction(tool, r.Name, result); return result; }
 
-        public ReachyService(SpawnJSRuntime js, GeminiChatService gemini, BrowserExtensionService bes)
+        public ReachyService(SpawnJSRuntime js, GeminiChatService gemini, BrowserExtensionService bes, SpeechService speech)
         {
             _js = js;
             _gemini = gemini;
             _bes = bes;
+            _speech = speech;
         }
 
         private async Task InitAsync()
@@ -268,6 +292,458 @@ namespace Gemineachy.Services.Reachy
             SafeAsync(name, async c => { await c.SetMotorModeAsync(MotorMode.Enabled); await c.GotoAsync(headPose: new XyzRpyPose(Roll: roll, Pitch: pitch, Yaw: yaw), duration: 0.8); });
         public Task ManualAntennasAsync(string name, double left, double right) =>
             SafeAsync(name, async c => { await c.SetMotorModeAsync(MotorMode.Enabled); await c.GotoAsync(antennas: (left, right), duration: 0.5); });
+
+        /// <summary>
+        /// Connect to the robot's WebRTC signalling server and report what it advertises, without starting a
+        /// media session. This is the readiness check for the A/V link: it proves the whole relay path works
+        /// (content script -> background service worker -> the robot's plain <c>ws://</c>, which the https
+        /// page itself cannot open) and that the robot is actually publishing a producer to connect to.
+        /// </summary>
+        public async Task<string> TestSignalingAsync(string? name = null, int port = 8443)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "TestSignaling";
+            GstSignallingClient? sig = null;
+            try
+            {
+                sig = new GstSignallingClient(r.Host, port, new RelayedSignalingSocket(_bes));
+                await sig.ConnectAsync();
+                var producers = await sig.ListProducersAsync();
+                var names = producers.Select(p => p.Name is null ? p.Id : $"{p.Name} ({p.Id})").ToList();
+                var result = names.Count == 0
+                    ? $"{r.Name}: signalling reachable at ws://{r.Host}:{port} (peerId {sig.PeerId}) but the robot is advertising NO producer - its media pipeline is not publishing."
+                    : $"{r.Name}: signalling OK at ws://{r.Host}:{port} (peerId {sig.PeerId}); producers: {string.Join(", ", names)}.";
+                return Done(tool, r, result);
+            }
+            catch (Exception ex)
+            {
+                // Diagnostics are this method's whole job, so report the failure IN FULL rather than through
+                // Fail()'s summarised "is the robot reachable?" message - the useful part of a signalling
+                // failure is the exact exception, and it is usually longer than the status-line trim.
+                r.Status = Short(ex.Message);
+                var full = $"{r.Name}: signalling FAILED at ws://{r.Host}:{port} - {ex.GetType().Name}: {ex.Message}";
+                LogAction(tool, r.Name, "FAILED: " + Short(ex.Message));
+                return full;
+            }
+            finally { if (sig != null) await sig.DisposeAsync(); }
+        }
+
+        // ---- Hearing the robot ------------------------------------------------------------------------
+
+        /// <summary>
+        /// Record a fixed window of the robot's microphone and transcribe it, to prove the speech path
+        /// end-to-end before any voice-activity detection is in front of it.
+        /// </summary>
+        /// <remarks>
+        /// This taps <see cref="RoseAudioLink.StartPcmCapture"/>, the path the browser host deliberately
+        /// leaves off for plain listening - playing audio hands the track to an &lt;audio&gt; element and never
+        /// decodes it in .NET, but recognising speech genuinely needs the samples. The two coexist: the
+        /// element keeps playing while this runs.
+        /// </remarks>
+        /// <summary>
+        /// Start keeping a rolling window of the robot's microphone, so speech can be transcribed after it
+        /// has been spoken rather than on cue.
+        /// </summary>
+        public string StartEars(string? name = null, int windowSeconds = 30)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            if (r.Audio == null) return $"{r.Name}: connect the audio link first (Listen), then start ears.";
+            if (r.Ears != null) return $"{r.Name}: already listening ({r.Ears.Count / SpeechService.SampleRate}s buffered).";
+            // 30s is Whisper's window, so there is no point retaining more than one model input's worth.
+            var ring = new PcmRing(SpeechService.SampleRate * windowSeconds);
+            Action<short[]> sink = ring.Write;
+            r.Ears = ring;
+            r.EarsSink = sink;
+            r.Audio.OnMicAudio += sink;
+            r.Audio.StartPcmCapture();
+            NotifyChanged();
+            return Done("Ears", r, $"{r.Name}: listening - keeping the last {windowSeconds}s of the robot's microphone.");
+        }
+
+        /// <summary>Stop the rolling capture (the audio link and playback are untouched).</summary>
+        public string StopEars(string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            if (r.Ears == null) return $"{r.Name}: ears were not on.";
+            if (r.Audio != null && r.EarsSink != null) r.Audio.OnMicAudio -= r.EarsSink;
+            r.Ears = null;
+            r.EarsSink = null;
+            NotifyChanged();
+            return Done("Ears", r, $"{r.Name}: stopped listening.");
+        }
+
+        /// <summary>
+        /// One-shot end-to-end speech test: make sure the link is up and the ears are on, let the buffer
+        /// fill, then transcribe. Every step reports what it did.
+        /// </summary>
+        /// <remarks>
+        /// Exists because driving this as four separate clicks made the SEQUENCE the fragile part - a step
+        /// that silently did not take left the next one with nothing to work on, and the failure looked
+        /// like the speech pipeline rather than the choreography. One entry point, one result.
+        /// </remarks>
+        public async Task<string> RunSpeechSelfTestAsync(string? name = null, int listenSeconds = 8)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            var steps = new List<string>();
+
+            if (r.Audio == null)
+            {
+                var connect = await ConnectAudioAsync(r.Name);
+                steps.Add(r.Audio == null ? $"link FAILED ({Short(connect)})" : "link up");
+                if (r.Audio == null) return string.Join("; ", steps);
+            }
+            else steps.Add("link already up");
+
+            if (r.Ears == null) { StartEars(r.Name); steps.Add(r.Ears == null ? "ears FAILED" : "ears on"); }
+            else steps.Add("ears already on");
+            if (r.Ears == null) return string.Join("; ", steps);
+
+            // ALWAYS capture fresh audio. Reusing whatever happened to be in the ring made the test
+            // transcribe history - it once reported on audio from minutes earlier, while the person who
+            // asked for the test was talking, and read as a speech failure instead of a stale buffer.
+            r.Ears.Clear();
+            await Task.Delay(TimeSpan.FromSeconds(listenSeconds));
+            steps.Add($"recorded {listenSeconds}s fresh");
+
+            var pcm = r.Ears.Snapshot(SpeechService.SampleRate * listenSeconds);
+            if (pcm.Length == 0) return string.Join("; ", steps) + "; nothing captured";
+            var result = await TranscribeBufferAsync(r, pcm);
+            return Done("SpeechSelfTest", r, string.Join("; ", steps) + " -> " + result);
+        }
+
+        /// <summary>Transcribe the most recent <paramref name="seconds"/> of what the robot heard.</summary>
+        public async Task<string> TranscribeRecentAsync(string? name = null, int seconds = 10)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "Transcribe";
+            if (r.Ears == null) return $"{r.Name}: ears are not on - press Ears first, talk, then transcribe.";
+            var pcm = r.Ears.Snapshot(SpeechService.SampleRate * seconds);
+            if (pcm.Length == 0) return Done(tool, r, $"{r.Name}: nothing buffered yet.");
+            return Done(tool, r, await TranscribeBufferAsync(r, pcm));
+        }
+
+        public async Task<string> ListenAndTranscribeAsync(string? name = null, int seconds = 6)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "Transcribe";
+            if (r.Audio == null) return $"{r.Name}: connect the audio link first (Listen), then transcribe.";
+
+            var buffer = new List<short>(SpeechService.SampleRate * seconds);
+            void Collect(short[] pcm) { lock (buffer) buffer.AddRange(pcm); }
+            try
+            {
+                r.Audio.OnMicAudio += Collect;
+                r.Audio.StartPcmCapture();          // idempotent; a no-op if PCM is already flowing
+                await Task.Delay(TimeSpan.FromSeconds(seconds));
+            }
+            finally { r.Audio.OnMicAudio -= Collect; }
+
+            short[] pcm;
+            lock (buffer) pcm = buffer.ToArray();
+            if (pcm.Length == 0)
+                return Done(tool, r, $"{r.Name}: captured no audio - is the link still up?");
+
+            return Done(tool, r, await TranscribeBufferAsync(r, pcm));
+        }
+
+        /// <summary>
+        /// Transcribe a buffer and describe the outcome, including the LEVEL of what was heard.
+        /// </summary>
+        /// <remarks>
+        /// The level is not decoration. "Nothing recognised" is ambiguous between a quiet room and a broken
+        /// pipeline, and those need opposite fixes - measuring it is what showed the audio was clean
+        /// speech at -23.9 dBFS and sent me looking for the real defect instead of blaming the microphone.
+        /// </remarks>
+        private async Task<string> TranscribeBufferAsync(ReachyRobot r, short[] pcm)
+        {
+            double sumSq = 0; int peak = 0;
+            foreach (var s in pcm) { sumSq += (double)s * s; peak = Math.Max(peak, Math.Abs((int)s)); }
+            var rms = Math.Sqrt(sumSq / pcm.Length) / 32768.0;
+            var rmsDbfs = rms > 0 ? 20 * Math.Log10(rms) : double.NegativeInfinity;
+            var seconds = pcm.Length / (double)SpeechService.SampleRate;
+            var level = $"level {rmsDbfs:F1} dBFS, peak {peak / 32768.0:F3}";
+
+            var outcome = await _speech.TranscribeAsync(pcm);
+            if (outcome.Error != null)
+                return $"{r.Name}: transcription FAILED after {seconds:F1}s of audio ({level}) - {outcome.Error}";
+            var text = string.IsNullOrWhiteSpace(outcome.Text) ? "(nothing recognised)" : outcome.Text;
+            return $"{r.Name}: heard \"{text}\" [{seconds:F1}s audio, {level}, {outcome.ElapsedMs}ms on {_speech.Describe()}] {_speech.ModelInputs}";
+        }
+
+        // ---- Acting out Gemini's replies -------------------------------------------------------------
+
+        /// <summary>
+        /// While on, every reply Gemini writes is scanned for inline <c>*stage directions*</c> and the
+        /// robot acts them out.
+        /// </summary>
+        public bool AnimateFromChat
+        {
+            get => _animateFromChat;
+            set
+            {
+                if (_animateFromChat == value) return;
+                _animateFromChat = value;
+                if (value) _gemini.OnQueryResponse += OnGeminiReplied;
+                else _gemini.OnQueryResponse -= OnGeminiReplied;
+                NotifyChanged();
+            }
+        }
+        private bool _animateFromChat;
+
+        /// <summary>What Gemini is told when animation is switched on. Mirrors how the desktop companion
+        /// asks for physical reactions - the model narrates action inline and the robot performs it.</summary>
+        private const string AnimationBrief =
+            "A Reachy Mini robot is now acting out your replies physically. It has a head that tilts, nods and "
+            + "turns, a rotating body, and two antennas. Write physical reactions inline in asterisks, as stage "
+            + "directions, the way a screenplay does - for example: \"*tilts head curiously* That is a good "
+            + "question!\" or \"*antennas perk up* I found it!\". Put the action FIRST so the movement lands with "
+            + "the words. Keep them short and physical (tilt, nod, shake, lean in, look up, look down, spin, "
+            + "bounce, antennas perk/droop/wiggle, turn body). Everything outside the asterisks is what the robot "
+            + "says, so never put narration there. Do not mention this arrangement to the user.";
+
+        private void OnGeminiReplied(string query, string response) => _ = PerformFromTextAsync(response);
+
+        /// <summary>
+        /// Act out the <c>*stage directions*</c> in a piece of model text.
+        /// </summary>
+        /// <remarks>
+        /// The split and the gesture vocabulary come from the SpawnDev.Reachy library, the same code the
+        /// desktop companion runs - a second implementation here would drift from it within a week.
+        /// Gestures are fired and NOT awaited, deliberately: in the desktop companion the movement runs
+        /// alongside the speech, because a robot that finishes moving before it starts talking reads as a
+        /// machine executing a script.
+        /// </remarks>
+        public async Task<string> PerformFromTextAsync(string text, string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            var (_, actions) = SpokenText.Split(text);
+            if (actions.Length == 0) return $"{r.Name}: no stage directions in that text.";
+            // A robot with motors disabled ACCEPTS every move and stays perfectly still, so this looks
+            // exactly like a broken gesture pipeline. Enable first, as the other movement tools do.
+            try { await r.Client.SetMotorModeAsync(MotorMode.Enabled); }
+            catch (Exception ex) { Console.WriteLine($"[Reachy] enable motors before gesture: {ex.Message}"); }
+            r.Body ??= new ReachyBody(r.Client);
+            var performed = new List<string>();
+            foreach (var a in actions)
+            {
+                var gesture = GestureClassifier.Classify(a);
+                if (gesture == Gesture.None) continue;
+                performed.Add($"{gesture} <- \"{Short(a)}\"");
+                _ = r.Body.PerformAsync(a, GestureStyle.Default);
+            }
+            await Task.CompletedTask;
+            var result = performed.Count == 0
+                ? $"{r.Name}: {actions.Length} stage direction(s), none recognisable as a gesture."
+                : $"{r.Name}: performing {string.Join("; ", performed)}";
+            return Done("Perform", r, result);
+        }
+
+        /// <summary>Turn chat-driven animation on/off and tell Gemini what changed.</summary>
+        public async Task<string> SetAnimateFromChatAsync(bool on)
+        {
+            AnimateFromChat = on;
+            try { await _gemini.NotifyToolContext(on ? AnimationBrief : "The robot has stopped acting out your replies; stage directions are no longer needed."); }
+            catch (Exception ex) { Console.WriteLine($"[Reachy] animation brief failed: {ex.Message}"); }
+            return on
+                ? "Gemini's replies will now be acted out by the robot."
+                : "Gemini's replies will no longer be acted out.";
+        }
+
+        /// <summary>
+        /// Open the live WebRTC audio link to the robot and play its microphone through a hidden
+        /// <c>&lt;audio&gt;</c> element, so the user can hear the room the robot is in.
+        /// </summary>
+        /// <remarks>
+        /// Only the SIGNALLING is relayed through the background worker (the page cannot open the robot's
+        /// plain <c>ws://</c>); the media flows page &lt;-&gt; robot directly, and the decoded track is handed
+        /// straight to the audio element. No audio sample ever crosses into .NET - that would be pure
+        /// overhead for something the browser already decodes and plays.
+        /// Must be called from a user gesture: browsers refuse to start playback without one.
+        /// </remarks>
+        public async Task<string> ConnectAudioAsync(string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "ConnectAudio";
+            if (r.Audio != null) return $"{r.Name}: audio link is already connected ({r.AudioState}).";
+            try
+            {
+                var link = new RoseAudioLink(r.Host, () => new RelayedSignalingSocket(_bes));
+                link.Log += m => Console.WriteLine($"[RoseAudio] {m}");
+                link.OnConnectionStateChanged += s =>
+                {
+                    r.AudioState = s;
+                    // "failed"/"closed" arrive without any call of ours - reflect them so the UI cannot
+                    // keep claiming a link that the browser has already torn down.
+                    if (s is "failed" or "closed") _ = DisconnectAudioAsync(r.Name);
+                    NotifyChanged();
+                };
+                // Deliberately NOT subscribing OnMicAudio: that would decode the same track to PCM in .NET
+                // for nobody. Speech recognition, if it is ever wanted here, subscribes and the library
+                // starts that path on its own.
+                link.OnAudioTrack += track => AttachAudioElement(r, track);
+
+                r.Audio = link;                       // set before connecting so a state event has somewhere to land
+                await link.ConnectAsync();
+                r.Online = true;
+                return Done(tool, r, $"{r.Name}: audio link connected ({r.AudioState}); you should hear the robot's microphone.");
+            }
+            catch (Exception ex)
+            {
+                await DisconnectAudioAsync(r.Name);
+                r.AudioState = Short(ex.Message);
+                LogAction(tool, r.Name, "FAILED: " + Short(ex.Message));
+                return $"{r.Name}: audio link FAILED - {ex.GetType().Name}: {ex.Message}";
+            }
+            finally { NotifyChanged(); }
+        }
+
+        /// <summary>
+        /// Start sending this machine's microphone to the robot's speaker, so the user can talk to it.
+        /// Requires an audio link (<see cref="ConnectAudioAsync"/>) and a user gesture - the browser will
+        /// prompt for microphone permission on the page's origin the first time.
+        /// </summary>
+        /// <remarks>
+        /// Echo cancellation is requested explicitly rather than left to defaults, because the normal way
+        /// to use this is with the robot's microphone playing on the user's LOUDSPEAKERS: without AEC the
+        /// captured mic re-sends the robot's own room audio back to it and the loop howls. (The robot's
+        /// XVF3800 cancels its OWN output, which is a different problem - it cannot know what our speakers
+        /// are doing.) Headphones make it moot; AEC makes it work either way.
+        /// </remarks>
+        public async Task<string> StartTalkingAsync(string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "StartTalking";
+            if (r.Audio == null) return $"{r.Name}: connect the audio link first (Listen), then talk.";
+            if (r.MicStream != null) return $"{r.Name}: already sending your microphone.";
+            try
+            {
+                var stream = await RTCMediaDevices.GetUserMedia(new SpawnDev.RTC.MediaStreamConstraints
+                {
+                    Audio = new SpawnDev.RTC.MediaTrackConstraints
+                    {
+                        EchoCancellation = true,
+                        NoiseSuppression = true,
+                        AutoGainControl = true,
+                    },
+                });
+                var track = stream.GetAudioTracks().FirstOrDefault()
+                    ?? throw new InvalidOperationException("getUserMedia returned no audio track.");
+                await r.Audio.SetSendTrackAsync(track);
+                r.MicStream = stream;
+                return Done(tool, r, $"{r.Name}: your microphone is now going to the robot's speaker - talk to it.");
+            }
+            catch (Exception ex)
+            {
+                try { await StopTalkingAsync(r.Name); } catch { }
+                LogAction(tool, r.Name, "FAILED: " + Short(ex.Message));
+                return $"{r.Name}: microphone FAILED - {ex.GetType().Name}: {ex.Message}";
+            }
+            finally { NotifyChanged(); }
+        }
+
+        /// <summary>Stop sending the microphone (the audio link stays up, so the robot can still be heard).</summary>
+        public async Task<string> StopTalkingAsync(string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            var stream = r.MicStream;
+            r.MicStream = null;
+            // Clear the sender first so nothing is mid-send when the track stops. replaceTrack(null) needs
+            // no renegotiation, so the link itself is undisturbed and Listen keeps working.
+            if (r.Audio != null)
+            {
+                try { await r.Audio.SetSendTrackAsync(null); }
+                catch (Exception ex) { Console.WriteLine($"[RoseAudio] clearing send track: {ex.Message}"); }
+            }
+            if (stream != null)
+            {
+                // Stop every track, or the browser leaves the mic-in-use indicator on.
+                foreach (var t in stream.GetTracks()) { try { t.Stop(); t.Dispose(); } catch { } }
+                try { stream.Dispose(); } catch { }
+                LogAction("StopTalking", r.Name, $"{r.Name}: microphone stopped.");
+            }
+            NotifyChanged();
+            return stream == null ? $"{r.Name}: microphone was not on." : $"{r.Name}: microphone stopped.";
+        }
+
+        /// <summary>Tear down the audio link and stop playback.</summary>
+        public async Task<string> DisconnectAudioAsync(string? name = null)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            // Release the microphone first - dropping the link without stopping the tracks leaves the
+            // browser's "in use" indicator on and the device held.
+            if (r.MicStream != null) await StopTalkingAsync(r.Name);
+            var link = r.Audio;
+            var el = r.AudioElement;
+            r.Audio = null;
+            r.AudioElement = null;
+            if (el != null)
+            {
+                try { el.Pause(); el.SrcObject = null; el.Remove(); } catch (Exception ex) { Console.WriteLine($"[RoseAudio] element teardown: {ex.Message}"); }
+                el.Dispose();
+            }
+            if (link != null)
+            {
+                try { await link.DisposeAsync(); } catch (Exception ex) { Console.WriteLine($"[RoseAudio] link teardown: {ex.Message}"); }
+                r.AudioState = "closed";
+                LogAction("DisconnectAudio", r.Name, $"{r.Name}: audio link closed.");
+            }
+            NotifyChanged();
+            return link == null ? $"{r.Name}: no audio link was connected." : $"{r.Name}: audio link closed.";
+        }
+
+        /// <summary>
+        /// Put the robot's decoded audio track into a hidden autoplay &lt;audio&gt; element.
+        /// </summary>
+        private void AttachAudioElement(ReachyRobot r, IRTCMediaStreamTrack track)
+        {
+            try
+            {
+                // The cross-platform track wraps a real MediaStreamTrack in the browser; srcObject needs
+                // that native object inside a MediaStream.
+                if (track is not BrowserRTCMediaStreamTrack browserTrack)
+                {
+                    r.AudioState = $"unexpected track type {track.GetType().Name}";
+                    return;
+                }
+                using var document = _js.Get<Document>("document");
+                var el = document.CreateElement<HTMLAudioElement>("audio");
+                el.AutoPlay = true;
+                el.SetAttribute("data-gemineachy-reachy-audio", r.Name);
+                el.SrcObject = new MediaStream(new[] { browserTrack.NativeTrack });
+                using var body = document.Body!;
+                body.AppendChild(el);
+                r.AudioElement = el;
+                // autoplay alone is not enough to be sure: report a rejected play() instead of leaving
+                // the user with a link that says "connected" and makes no sound.
+                _ = el.Play().ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                    {
+                        r.AudioState = "playback blocked: " + Short(t.Exception?.GetBaseException().Message ?? "play() rejected");
+                        Console.WriteLine($"[RoseAudio] play() rejected: {t.Exception?.GetBaseException().Message}");
+                        NotifyChanged();
+                    }
+                }, TaskScheduler.Default);
+                Console.WriteLine($"[RoseAudio] attached track {track.Id} to <audio>");
+            }
+            catch (Exception ex)
+            {
+                r.AudioState = "attach failed: " + Short(ex.Message);
+                Console.WriteLine($"[RoseAudio] attach failed: {ex}");
+            }
+            NotifyChanged();
+        }
 
         private async Task SafeAsync(string name, Func<ReachyMiniClient, Task> action)
         {

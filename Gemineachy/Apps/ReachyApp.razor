@@ -3,6 +3,7 @@
 @attribute [App(Name = "Reachy", Icon = "🤖", Pinned = true, SingleInstance = true, Description = "Connect and control Reachy Mini robots")]
 @inherits AppBase
 @inject ReachyService Reachy
+@inject SpeechService Speech
 
 <div class="reachy-app">
     <div class="reachy-section">
@@ -37,6 +38,38 @@
                         <button class="reachy-btn" title="Look right" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0, -0.4))">→</button>
                         <button class="reachy-btn" title="Center head" @onclick="() => Do(() => Reachy.ManualHeadAsync(r.Name, 0, 0))">◎</button>
                         <button class="reachy-btn" title="Wiggle antennas" @onclick="() => Do(() => Reachy.ManualAntennasAsync(r.Name, 0.8, 0.8))">📡</button>
+                        <span class="ctrl-sep"></span>
+                        <button class="reachy-btn" title="Act out a sample stage direction, the same path Gemini's replies take" @onclick="() => Report(() => Reachy.PerformFromTextAsync(SampleLine, r.Name))">🎭 Test gesture</button>
+                        <button class="reachy-btn" title="One-shot: connect the audio link, listen for 8 seconds, and transcribe what the robot heard" @onclick="() => Report(() => Reachy.RunSpeechSelfTestAsync(r.Name))">🗣 Test STT</button>
+                        <button class="reachy-btn" title="Transcribe a known speech recording shipped with the extension - proves the STT pipeline without needing anyone to talk" @onclick="() => Report(() => Speech.RunSelfTestAsync())">🧪 STT self-test</button>
+                        <span class="ctrl-sep"></span>
+                        <button class="reachy-btn" title="Check the WebRTC signalling link (ws://:8443 via the background worker) and list what the robot is publishing" @onclick="() => Report(() => Reachy.TestSignalingAsync(r.Name))">🔊?</button>
+                        @if (r.AudioConnected)
+                        {
+                            <button class="reachy-btn" title="Stop listening and close the WebRTC audio link" @onclick="() => Report(() => Reachy.DisconnectAudioAsync(r.Name))">🔇 Stop listening</button>
+                            @if (r.MicSending)
+                            {
+                                <button class="reachy-btn" title="Stop sending your microphone to the robot" @onclick="() => Report(() => Reachy.StopTalkingAsync(r.Name))">🎙 Stop talking</button>
+                            }
+                            else
+                            {
+                                <button class="reachy-btn" title="Send your microphone to the robot's speaker so you can talk to it" @onclick="() => Report(() => Reachy.StartTalkingAsync(r.Name))">🎤 Talk</button>
+                            }
+                            @if (r.EarsOn)
+                            {
+                                <button class="reachy-btn" title="Transcribe the last 10 seconds the robot heard - talk first, then press this" @onclick="() => Report(() => Reachy.TranscribeRecentAsync(r.Name))">🗣 Transcribe last 10s</button>
+                                <button class="reachy-btn" title="Stop keeping a rolling window of the microphone" @onclick="() => Report(() => Task.FromResult(Reachy.StopEars(r.Name)))">👂 Ears off</button>
+                            }
+                            else
+                            {
+                                <button class="reachy-btn" title="Keep a rolling 30s window of the robot's microphone so any recent moment can be transcribed" @onclick="() => Report(() => Task.FromResult(Reachy.StartEars(r.Name)))">👂 Ears on</button>
+                            }
+                            <span class="robot-status">audio: @r.AudioState</span>
+                        }
+                        else
+                        {
+                            <button class="reachy-btn" title="Open the WebRTC audio link and play the robot's microphone here" @onclick="() => Report(() => Reachy.ConnectAudioAsync(r.Name))">🔈 Listen</button>
+                        }
                     </div>
                     @if (ReachyService.NeedsHostPermission(r.Host))
                     {
@@ -52,6 +85,16 @@
         <input class="reachy-input host" placeholder="reachy-mini.local or 192.168.1.x" @bind="_host" @bind:event="oninput" />
         <input class="reachy-input port" placeholder="8000" @bind="_port" @bind:event="oninput" />
         <button class="reachy-btn add" @onclick="Add" disabled="@_busy">+ Add robot</button>
+    </div>
+    <div class="reachy-add">
+        @if (Reachy.AnimateFromChat)
+        {
+            <button class="reachy-btn" title="Stop acting out Gemini's replies" @onclick="() => Report(() => Reachy.SetAnimateFromChatAsync(false))">🎭 Acting out Gemini's replies - stop</button>
+        }
+        else
+        {
+            <button class="reachy-btn" title="Let Gemini animate the robot: it writes *stage directions* inline and the robot performs them" @onclick="() => Report(() => Reachy.SetAnimateFromChatAsync(true))">🎭 Let Gemini animate the robot</button>
+        }
     </div>
 
     @if (!string.IsNullOrEmpty(_status))
@@ -91,6 +134,10 @@
     private string _host = "reachy-mini.local";
     private string _port = "8000";
 
+    /// <summary>Exercises the exact path a Gemini reply takes: split off the stage direction, classify it,
+    /// perform it. Two directions so the queueing behaviour is visible, not just a single twitch.</summary>
+    private const string SampleLine = "*tilts head curiously* Hello there! *antennas perk up* Ready when you are.";
+
     protected override async Task OnInitializedAsync()
     {
         Reachy.OnChanged += OnChanged;
@@ -121,6 +168,9 @@
 
     // Manual control buttons: fire the action and surface any failure in the status line.
     private async Task Do(Func<Task> action) => await Run(action);
+
+    // Same, for an action whose RESULT is the point - it becomes the status line.
+    private async Task Report(Func<Task<string>> action) => await Run(async () => _status = await action());
 
     private async Task Run(Func<Task> action)
     {
