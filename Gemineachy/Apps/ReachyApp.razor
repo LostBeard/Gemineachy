@@ -42,6 +42,7 @@
                         <button class="reachy-btn" title="Act out a sample stage direction, the same path Gemini's replies take" @onclick="() => Report(() => Reachy.PerformFromTextAsync(SampleLine, r.Name))">🎭 Test gesture</button>
                         <button class="reachy-btn" title="One-shot: connect the audio link, listen for 8 seconds, and transcribe what the robot heard" @onclick="() => Report(() => Reachy.RunSpeechSelfTestAsync(r.Name))">🗣 Test STT</button>
                         <button class="reachy-btn" title="Transcribe a known speech recording shipped with the extension - proves the STT pipeline without needing anyone to talk" @onclick="() => Report(() => Speech.RunSelfTestAsync())">🧪 STT self-test</button>
+                        <button class="reachy-btn" title="Listen for 6 seconds, transcribe what the robot heard, and send it to Gemini as a chat message. Turn on 'act out replies' and the robot answers physically." @onclick="() => Report(() => Reachy.ListenAndAskGeminiAsync(r.Name))">💬 Listen and ask Gemini</button>
                         <span class="ctrl-sep"></span>
                         <button class="reachy-btn" title="Check the WebRTC signalling link (ws://:8443 via the background worker) and list what the robot is publishing" @onclick="() => Report(() => Reachy.TestSignalingAsync(r.Name))">🔊?</button>
                         @if (r.AudioConnected)

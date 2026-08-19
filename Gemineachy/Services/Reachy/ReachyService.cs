@@ -460,6 +460,57 @@ namespace Gemineachy.Services.Reachy
         /// pipeline, and those need opposite fixes - measuring it is what showed the audio was clean
         /// speech at -23.9 dBFS and sent me looking for the real defect instead of blaming the microphone.
         /// </remarks>
+        /// <summary>
+        /// Close the loop: listen to the robot's microphone, transcribe it, and send what was heard to
+        /// Gemini as a normal chat message.
+        /// </summary>
+        /// <remarks>
+        /// Every piece of this already existed separately - the audio link, the PCM ring, Whisper, and
+        /// <see cref="AnimateFromChat"/>'s reply-to-gesture hook. What was missing was the one link that
+        /// hands the transcription to Gemini, so the robot could hear and could act, but nothing joined the
+        /// two.
+        ///
+        /// The reply is deliberately NOT acted out here. <see cref="AnimateFromChat"/> already subscribes to
+        /// <c>OnQueryResponse</c>, so performing it here as well would run every gesture twice. Turn that
+        /// toggle on and the robot answers physically; leave it off and this is transcription plus a chat
+        /// message.
+        ///
+        /// Voice OUT is the remaining gap: the daemon has no TTS endpoint (only sounds/upload + play_sound),
+        /// so speaking the reply needs a synthesiser we do not have in-house yet.
+        /// </remarks>
+        public async Task<string> ListenAndAskGeminiAsync(string? name = null, int seconds = 6)
+        {
+            var (r, error) = Resolve(name);
+            if (r == null) return error!;
+            const string tool = "ListenAndAsk";
+
+            if (r.Audio == null)
+            {
+                var connect = await ConnectAudioAsync(r.Name);
+                if (r.Audio == null) return Done(tool, r, $"{r.Name}: audio link FAILED ({Short(connect)})");
+            }
+            if (r.Ears == null) StartEars(r.Name);
+            if (r.Ears == null) return Done(tool, r, $"{r.Name}: could not start ears.");
+
+            // Always capture FRESH audio - reusing whatever sat in the ring once transcribed minutes-old
+            // history while the person was still talking, which reads as a speech failure rather than a
+            // stale buffer.
+            r.Ears.Clear();
+            await Task.Delay(TimeSpan.FromSeconds(seconds));
+            var pcm = r.Ears.Snapshot(SpeechService.SampleRate * seconds);
+            if (pcm.Length == 0) return Done(tool, r, $"{r.Name}: nothing captured in {seconds}s.");
+
+            var outcome = await _speech.TranscribeAsync(pcm);
+            if (outcome.Error != null)
+                return Done(tool, r, $"{r.Name}: transcription FAILED - {outcome.Error}");
+            var heard = (outcome.Text ?? "").Trim();
+            if (heard.Length == 0) return Done(tool, r, $"{r.Name}: nothing recognised in {seconds}s of audio.");
+
+            var reply = await _gemini.Query(heard);
+            return Done(tool, r,
+                $"{r.Name}: heard \"{heard}\" ({outcome.ElapsedMs}ms) -> Gemini: \"{Short(reply)}\"");
+        }
+
         private async Task<string> TranscribeBufferAsync(ReachyRobot r, short[] pcm)
         {
             double sumSq = 0; int peak = 0;
