@@ -1,8 +1,10 @@
 # Gemineachy
-A .Net Wasm browser extension that adds tools, games, and eventually full Reachy Mini integration to Gemini web browser chat. 
+A .NET WebAssembly browser extension that supercharges Gemini with client-side tools, virtual filesystems, interactive games, and Reachy Mini robotics integration.
 
 ## Current Features
-- Checkers with Gemini
+- Checkers
+- Chess
+- Virtual file system with OPFS and external folder support
 
 ## Features to come
 - Reachy Mini control 
