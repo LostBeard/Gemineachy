@@ -1,0 +1,1 @@
+window.__geminiMsg = 'Call FileSystemService.WriteFile with path /opfs/PayloadProof.cs and OMIT the content argument from the JSON entirely. Instead put the file contents in a payload block: a line «PAYLOAD:content», then a C# code block containing a program that prints Hello, "World"!, then a line «/PAYLOAD:content».';

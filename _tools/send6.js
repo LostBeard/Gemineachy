@@ -1,0 +1,1 @@
+window.__geminiMsg = 'Good, now actually make the tool call too. Emit BOTH: first the line «TOOL_CALL {"tool":"FileSystemService.WriteFile","args":{"path":"/opfs/PayloadProof.cs"}} » and then the same «PAYLOAD:content» block you just wrote. Both in the same reply.';

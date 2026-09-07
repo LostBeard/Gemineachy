@@ -1,0 +1,1 @@
+window.__geminiMsg = 'That was malformed. Call GeminiChatService.GetToolSchema for FileSystemService.WriteFile first, then write /opfs/ChromeStrip.cs with a C# program printing Hello, "World"! Put the file contents in a «PAYLOAD:content» code block and omit content from the JSON.';

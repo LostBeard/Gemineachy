@@ -1,0 +1,1 @@
+window.__geminiMsg = 'Write a C# console program that prints Hello, "World"! to /opfs/AfterWwBump.cs using the browser filesystem tool. Put the file contents in a «PAYLOAD:content» code block and omit content from the JSON.';

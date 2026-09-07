@@ -1,0 +1,1 @@
+window.__geminiMsg = 'Write a C# console program to the file /opfs/ChromeStrip.cs using the browser filesystem tool. The program must print: Hello, "World"! Send the file contents through the PAYLOAD channel as a C# code block.';

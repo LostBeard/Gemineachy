@@ -1,0 +1,1 @@
+window.__geminiMsg = 'Use the filesystem tool to write a C# console program to /opfs/CodeBlockFix.cs. The program must print: Hello, "World"! Send the file contents through the PAYLOAD channel as a C# code block.';
