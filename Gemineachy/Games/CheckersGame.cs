@@ -59,7 +59,7 @@ namespace Gemineachy.Games
 
         public CheckersGame() => InitializeBoard();
 
-        public void InitializeBoard(string eventName = "Casual Text Match", string redName = "Player Red", string blackName = "Gemini (Black)")
+        public void InitializeBoard(string eventName = "Casual Text Match", string redName = "Player Red", string blackName = "Agent (Black)")
         {
             PdnTags.Clear();
             PdnTags["Event"] = eventName;

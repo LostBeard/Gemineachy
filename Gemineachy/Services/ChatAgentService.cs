@@ -1,4 +1,5 @@
-﻿using SpawnDev;
+﻿using Gemineachy.Services.Sites;
+using SpawnDev;
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.SpawnJS.RazorRenderer;
@@ -10,15 +11,20 @@ using File = SpawnDev.SpawnJS.JSObjects.File;
 
 namespace Gemineachy.Services
 {
-    public class GeminiChatService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
+    /// <summary>
+    /// The site-neutral agent loop: reads the chat page through an <see cref="IChatSite"/> adapter, runs the
+    /// tool calls a reply contains, and sends the results back - plus tool registration, discovery, the
+    /// manifest, and hiding tool traffic. (Was ChatAgentService; every Gemini-specific selector now lives in
+    /// <see cref="GeminiSite"/>.)
+    /// </summary>
+    public class ChatAgentService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
     {
-        const string FileAttachmentsSelector = "uploader-file-preview gem-attachment";
-        const string TextInputSelector = "chat-window div[contenteditable=\"true\"]";
-        const string FilesInputSelector = "input[type='file']";
-        const string UploadButtonSelector = "chat-window button[aria-label*=\"Upload\"]";
-        const string DictateButtonSelector = "chat-window button[aria-label*=\"Dictate\"]";
-        const string SendButtonSelector = "chat-window button[aria-label*=\"Send\"]";
-        const string StopButtonSelector = "chat-window button[aria-label*=\"Stop\"]";
+        /// <summary>Adapters for every supported chat site. The page's host picks one at startup.</summary>
+        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS) };
+        /// <summary>The chat site this page is, or null on a page Gemineachy has no adapter for.</summary>
+        public IChatSite? Site { get; private set; }
+        /// <summary>Display name of the chat agent on this page ("Gemini", "Duck.ai"), or "the chat agent".</summary>
+        public string AgentName => Site?.Name ?? "the chat agent";
         // Marker attribute placed on tool-traffic chat elements (tool-call model responses and our
         // injected tool-response/manifest user messages). Hidden by CSS unless ShowToolTraffic is on.
         const string ToolTrafficAttr = "data-gemineachy-tool";
@@ -44,7 +50,10 @@ namespace Gemineachy.Services
         public bool Busy => _busyTask.Task.IsCompleted == false;
         private Document? _document;
         private MutationObserver? _responseObserver;
-        private List<string> _processedConversationQuery = new List<string>();
+        // Set on every user message once it has been considered, so a turn is processed at most once. A DOM
+        // attribute rather than a key list: it needs no stable per-turn id (Duck.ai repeats ids), and a
+        // re-render that drops it is caught by the complete-at-first-sight rule in UpdateFromChat.
+        const string SeenAttr = "data-gemineachy-seen";
         private TaskCompletionSource _busyTask = new TaskCompletionSource();
         private ActionCallback? _mutationCallback;
         private SemaphoreSlim _queryLock = new SemaphoreSlim(1);
@@ -54,15 +63,21 @@ namespace Gemineachy.Services
         private Callback? _firstKeydownCallback;
         private Callback? _firstClickCallback;
         private bool _firstSendHandled;
-        const string ComposeBoxSelector = "div[contenteditable=\"true\"]";
-        const string SendButtonMatch = "button[aria-label*=\"Send\"]";
 
         public Dictionary<string, ToolCall> Tools = new Dictionary<string, ToolCall>();
         private async Task InitAsync()
         {
-            Console.WriteLine($"GeminiChatService.InitAsync() {JS.GlobalScopeName} {JS.InstanceId}");
+            Console.WriteLine($"ChatAgentService.InitAsync() {JS.GlobalScopeName} {JS.InstanceId}");
             if (JS.IsWindow)
             {
+                var host = JS.Get<string>("location.host") ?? "";
+                Site = CreateSites().FirstOrDefault(s => s.Matches(host));
+                if (Site == null)
+                {
+                    Console.WriteLine($"[Gemineachy] no chat-site adapter for '{host}'; agent tools are inactive on this page.");
+                    return;
+                }
+                Console.WriteLine($"[Gemineachy] chat site: {Site.Name}");
                 _document = JS.GetDocument();
                 if (_document != null)
                 {
@@ -81,7 +96,13 @@ namespace Gemineachy.Services
                         {
                             ChildList = true,
                             Subtree = true,
-                            CharacterData = true
+                            CharacterData = true,
+                            // Completion signals are ATTRIBUTE flips (Gemini aria-busy, Duck.ai
+                            // data-activeresponse / Send's disabled). Without these a finished reply was only
+                            // noticed if some unrelated child mutation happened to follow it. Filtered to the
+                            // site's own signals, so our marker attributes never feed back into the observer.
+                            Attributes = true,
+                            AttributeFilter = Site.WatchedAttributes,
                         });
                     }
                     // register tools this service provides
@@ -185,7 +206,7 @@ namespace Gemineachy.Services
                 "pointer-events:none !important;}" +
                 // While a tool send is in flight, collapse the compose box's text to a single line and
                 // hide it, so filling it with our (hidden) message and clearing it doesn't flash/grow.
-                $"html.{ToolSendingClass} {TextInputSelector}{{" +
+                $"html.{ToolSendingClass} {Site!.ComposeSelector}{{" +
                 "max-height:1lh !important;overflow:hidden !important;opacity:0 !important;}}";
             head.AppendChild(style);
         }
@@ -214,54 +235,33 @@ namespace Gemineachy.Services
         /// </summary>
         private void EarlyHideToolTraffic()
         {
-            if (_document == null) return;
+            if (_document == null || Site == null) return;
             // Our injected hidden user messages: tool results / manifest / game prompts.
             var userQueries = _document
-                .QuerySelectorAll<HTMLElement>($"chat-window user-query:not([{ToolTrafficAttr}])")
+                .QuerySelectorAll<HTMLElement>($"{Site.UserMessageSelector}:not([{ToolTrafficAttr}])")
                 .Using(o => o.ToArray());
             foreach (var uq in userQueries)
             {
                 using (uq)
                 {
-                    using var line = uq.QuerySelector<HTMLElement>("p.query-text-line");
-                    var text = line?.TextContent?.TrimStart() ?? "";
-                    if (text.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
-                        || text.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal)
-                        || text.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal))
+                    var text = Site.ReadUserText(uq).TrimStart();
+                    if (IsPlumbing(text) || text.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal))
                     {
                         uq.SetAttribute(ToolTrafficAttr, "");
                     }
-                }
-            }
-            // First-message tool note: the appended note lives in the SAME user-query as the user's own
-            // text, so we can't hide the whole element. Instead hide only the note lines (from the marker
-            // to the end), leaving the user's message visible. Idempotent (re-applied on every mutation,
-            // which also re-hides if Angular re-renders the paragraphs).
-            var firstNoteQueries = _document
-                .QuerySelectorAll<HTMLElement>("chat-window user-query")
-                .Using(o => o.ToArray());
-            foreach (var uq in firstNoteQueries)
-            {
-                using (uq)
-                {
-                    if ((uq.TextContent ?? "").IndexOf(ToolProtocol.FirstNoteMarker, StringComparison.Ordinal) < 0) continue;
-                    var lines = uq.QuerySelectorAll<HTMLElement>("p.query-text-line").Using(o => o.ToArray());
-                    var hiding = false;
-                    foreach (var p in lines)
+                    // First-message tool note: it lives in the SAME user message as the user's own text, so
+                    // the element stays visible and only the note is hidden (how depends on the site's DOM).
+                    // Idempotent - re-applied on every mutation, which also re-hides after a re-render.
+                    else if (text.Contains(ToolProtocol.FirstNoteMarker, StringComparison.Ordinal))
                     {
-                        using (p)
-                        {
-                            if (!hiding && (p.TextContent ?? "").IndexOf(ToolProtocol.FirstNoteMarker, StringComparison.Ordinal) >= 0)
-                                hiding = true;
-                            if (hiding) p.SetAttribute(ToolTrafficAttr, "");
-                        }
+                        Site.HideFirstNote(uq, ToolProtocol.FirstNoteMarker, ToolTrafficAttr);
                     }
                 }
             }
-            // Gemini responses that are tool-call blocks, or that the agent chose to hide with the
-            // «HIDDEN» marker - hidden the moment the marker streams in.
+            // Replies that are tool-call blocks, or that the agent chose to hide with the «HIDDEN» marker -
+            // hidden the moment the marker streams in.
             var modelResponses = _document
-                .QuerySelectorAll<HTMLElement>($"chat-window model-response:not([{ToolTrafficAttr}])")
+                .QuerySelectorAll<HTMLElement>($"{Site.ReplySelector}:not([{ToolTrafficAttr}])")
                 .Using(o => o.ToArray());
             foreach (var mr in modelResponses)
             {
@@ -432,6 +432,18 @@ namespace Gemineachy.Services
         // introduction (SendToolInfo).
         private readonly HashSet<string> _announcedTools = new();
         private bool _protocolIntroduced;
+        // True from the moment a send starts until it returns, so a conversation whose first message is in
+        // flight (not rendered yet) is not mistaken for an empty, never-introduced one.
+        private bool _sendInFlight;
+
+        /// <summary>
+        /// The tools still need introducing in the conversation on screen: never introduced on this page, OR the
+        /// user started a NEW chat (no user messages on screen, nothing of ours in flight). A chat site's "New
+        /// chat" is an in-page navigation, so the extension - and a page-lifetime "introduced" flag - survives
+        /// it. Measured 2026-10-12: after the first chat, every new Duck.ai chat got NO tool note at all and the
+        /// model, never told, answered "I can't write files from here".
+        /// </summary>
+        private bool ToolsNeedIntroducing() => !_protocolIntroduced || (!_sendInFlight && TurnCount() == 0);
 
         [AgentTool("Re-sends the tool manifest (protocol + the current tool index) to you. Call if you have lost track of the available tools or how to call them.")]
         public async Task SendToolInfo() => await SendToolInfo(null);
@@ -451,7 +463,6 @@ namespace Gemineachy.Services
             _announcedTools.Clear();
             foreach (var n in Tools.Keys) _announcedTools.Add(n);
             _protocolIntroduced = true;
-            RemoveFirstSendHooks(); // full manifest introduced this way; the first-message note is not needed
             await Query(header, ToolProtocol.ManifestFileName, manifest);
         }
         /// <summary>
@@ -463,7 +474,7 @@ namespace Gemineachy.Services
         /// <param name="addendum">Optional context to append (e.g. game setup instructions).</param>
         public async Task AnnounceToolChanges(string? addendum = null)
         {
-            if (!_protocolIntroduced)
+            if (ToolsNeedIntroducing())
             {
                 // Nothing introduced yet: the first message must carry the protocol + index.
                 await SendToolInfo(addendum);
@@ -489,7 +500,7 @@ namespace Gemineachy.Services
         public async Task NotifyToolContext(string note)
         {
             if (string.IsNullOrWhiteSpace(note)) return;
-            if (!_protocolIntroduced)
+            if (ToolsNeedIntroducing())
             {
                 await SendToolInfo(note);
                 return;
@@ -505,10 +516,10 @@ namespace Gemineachy.Services
         {
             try
             {
-                if (_protocolIntroduced || _firstSendHandled) return;
+                if (!ToolsNeedIntroducing() || _firstSendHandled) return;
                 if (e.Key != "Enter" || e.ShiftKey) return; // Shift+Enter = newline, not send
                 using var target = e.TargetAs<Element>();
-                using var box = target?.Closest<Element>(ComposeBoxSelector);
+                using var box = target?.Closest<Element>(Site!.ComposeSelector);
                 if (box == null) return; // not typing in the compose box
                 InterceptFirstSend(e);
             }
@@ -521,9 +532,9 @@ namespace Gemineachy.Services
         {
             try
             {
-                if (_protocolIntroduced || _firstSendHandled) return;
+                if (!ToolsNeedIntroducing() || _firstSendHandled) return;
                 using var target = e.TargetAs<Element>();
-                using var btn = target?.Closest<Element>(SendButtonMatch);
+                using var btn = target?.Closest<Element>(Site!.SendButtonSelector);
                 if (btn == null) return; // not the Send button
                 InterceptFirstSend(e);
             }
@@ -535,14 +546,87 @@ namespace Gemineachy.Services
         /// rides ANY first message - the user's, our own code's, or a future cron job's.</summary>
         private void InterceptFirstSend(Event e)
         {
-            using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
-            var userMsg = input?.TextContent?.Trim() ?? "";
+            var userMsg = CurrentComposeText().Trim();
             if (string.IsNullOrEmpty(userMsg)) return; // nothing composed; let the native (no-op) send be
-            // Take over: stop Gemini's own send for this event, and guard against a racing second event.
+            // Take over: stop the page's own send for this event, and guard against a racing second event
+            // until this send is done (the hooks stay armed for the next NEW chat).
             _firstSendHandled = true;
             e.StopImmediatePropagation();
             e.PreventDefault();
-            _ = Query(userMsg); // Query attaches the tool note (first genuine turn) and marks introduced
+            _ = SendInterceptedAsync(userMsg);
+        }
+
+        private async Task SendInterceptedAsync(string userMsg)
+        {
+            try { await Query(userMsg); } // Query attaches the tool note (first genuine turn) and marks introduced
+            catch (Exception ex) { Console.WriteLine($"[Gemineachy] intercepted first send failed: {ex.GetType().Name}: {ex.Message}"); }
+            finally { _firstSendHandled = false; }
+        }
+
+        // Completed when a reply carries no tool calls - i.e. the tool round chain has settled.
+        private TaskCompletionSource _loopIdle = new();
+
+        /// <summary>A message a person (or our own code on their behalf) is sending, not tool plumbing.</summary>
+        private static bool IsGenuineTurn(string text)
+        {
+            var t = (text ?? "").TrimStart();
+            return t.Length > 0 && !IsPlumbing(t) && !t.StartsWith(ToolProtocol.GameMarker, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Run the hidden warm-up round for a new chat: ask for ONLY a ListTools call, let its result go back, and
+        /// wait until the round chain settles (the model's hidden "ready"). Returns true when the model actually
+        /// wrote a tool call - i.e. it has now used the tools once and seen that they are real.
+        /// </summary>
+        private async Task<bool> WarmUpAsync(CancellationToken ct)
+        {
+            // Measured end to end on Duck.ai: once the warm-up is followed the real request uses the tools (2/2),
+            // but the warm-up itself is occasionally declined (~1 in 8), and a model that has declined in a chat
+            // tends to stay declined there. The user's message is still held at this point, so a declined warm-up
+            // is retried ONCE in a fresh chat rather than accepting a chat that will refuse the request.
+            for (int attempt = 1; attempt <= 2; attempt++)
+            {
+                Console.WriteLine($"[Gemineachy] new chat: hidden warm-up round before the first message (attempt {attempt})");
+                _protocolIntroduced = true;
+                _announcedTools.Clear();
+                foreach (var n in Tools.Keys) _announcedTools.Add(n);
+                var idle = _loopIdle = new TaskCompletionSource();
+                var reply = await Query(ToolProtocol.BuildWarmUpMessage(), null, ct);
+                var followed = ToolProtocol.ParseCalls(reply).Count > 0;
+                try { await idle.Task.WaitAsync(TimeSpan.FromSeconds(90), ct); }
+                catch (TimeoutException) { Console.WriteLine("[Gemineachy] warm-up round did not settle in 90 s; sending the message anyway"); }
+                if (followed)
+                {
+                    // The model's closing "ready" is plain text (asking it to hide its own reply made it refuse the
+                    // whole warm-up), so hide that last reply here - the user never sees any of the warm-up.
+                    HideLastReply();
+                    Console.WriteLine("[Gemineachy] warm-up followed - tools introduced");
+                    return true;
+                }
+                if (attempt == 1 && _document != null && Site!.StartNewChat(_document))
+                {
+                    Console.WriteLine("[Gemineachy] warm-up declined - retrying once in a fresh chat");
+                    using var fresh = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, fresh.Token);
+                    try { await QuerySelectorAsync(d => TurnCount() == 0, linked.Token); }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested) { break; }
+                    continue;
+                }
+                break;
+            }
+            Console.WriteLine("[Gemineachy] warm-up NOT followed - falling back to the note");
+            return false;
+        }
+
+        private void HideLastReply()
+        {
+            if (_document == null || Site == null) return;
+            var replies = _document.QuerySelectorAll<HTMLElement>(Site.ReplySelector).Using(o => o.ToArray());
+            for (int i = 0; i < replies.Length; i++)
+            {
+                if (i == replies.Length - 1) replies[i].SetAttribute(ToolTrafficAttr, "");
+                replies[i].Dispose();
+            }
         }
 
         /// <summary>On the FIRST genuine (non-plumbing) message to Gemini in this chat - whoever sends it -
@@ -550,7 +634,7 @@ namespace Gemineachy.Services
         /// messages (manifest / tool-results / game prompts) are the tool system itself and are left alone.</summary>
         private string MaybeAttachFirstToolNote(string text)
         {
-            if (_protocolIntroduced || string.IsNullOrWhiteSpace(text)) return text;
+            if (!ToolsNeedIntroducing() || string.IsNullOrWhiteSpace(text)) return text;
             var t = text.TrimStart();
             if (t.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
                 || t.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal)
@@ -559,19 +643,7 @@ namespace Gemineachy.Services
             _protocolIntroduced = true;
             _announcedTools.Clear();
             foreach (var n in Tools.Keys) _announcedTools.Add(n);
-            RemoveFirstSendHooks();
             return $"{text}\n\n{ToolProtocol.BuildFirstMessageToolNote()}";
-        }
-
-        private void RemoveFirstSendHooks()
-        {
-            try
-            {
-                if (_document == null) return;
-                if (_firstKeydownCallback != null) _document.RemoveEventListener("keydown", _firstKeydownCallback, true);
-                if (_firstClickCallback != null) _document.RemoveEventListener("click", _firstClickCallback, true);
-            }
-            catch { /* best effort */ }
         }
 
         private void Mutation_Observed()
@@ -579,44 +651,26 @@ namespace Gemineachy.Services
             // Hide tool traffic first, on every mutation, so it never flashes visible while streaming.
             EarlyHideToolTraffic();
             UpdateFromChat();
+            CheckLiveTurn();
             OnDOMMutation?.Invoke();
         }
-        // A response is still streaming while anything inside it is aria-busy="true". The Stop button alone
-        // is NOT enough - sampled 2026-10-12: Stop disappeared at 5.5 s while the response was still
-        // aria-busy and streaming until 7.7 s, so the turn was read early (68 chars of a WriteFile call),
-        // parsed as zero calls, and the model's correct tool call was silently never executed.
-        const string ResponseBusySelector = "chat-window model-response [aria-busy=\"true\"]";
-        private bool IsProcessing() => StopButtonVisible() || ResponseBusy() || (!SendButtonVisible() && !DictateButtonVisible());
-        private bool ResponseBusy()
+
+        /// <summary>The one user turn whose reply is being waited for. There is never more than one: a chat page
+        /// takes one message at a time.</summary>
+        private sealed class LiveTurn
         {
-            if (_document == null) return false;
-            using var busy = _document.QuerySelector(ResponseBusySelector);
-            return busy != null;
+            public HTMLElement User = default!;
+            public string Query = "";
+            public TaskCompletionSource<string> Response = new();
         }
-        private bool StopButtonVisible()
-        {
-            if (_document == null) return false;
-            using var button = _document.QuerySelector(StopButtonSelector);
-            return button != null;
-        }
-        private bool SendButtonVisible()
-        {
-            if (_document == null) return false;
-            using var button = _document.QuerySelector(SendButtonSelector);
-            return button != null;
-        }
-        private bool DictateButtonVisible()
-        {
-            if (_document == null) return false;
-            using var button = _document.QuerySelector(DictateButtonSelector);
-            return button != null;
-        }
-        private bool UploadButtonVisible()
-        {
-            if (_document == null) return false;
-            using var button = _document.QuerySelector(UploadButtonSelector);
-            return button != null;
-        }
+        private LiveTurn? _liveTurn;
+        /// <summary>The page is producing (or settling) a reply - per the site adapter's measured signals.</summary>
+        private bool IsProcessing() => _document != null && Site != null && Site.IsGenerating(_document);
+
+        /// <summary>Tool-system plumbing (results / manifest): part of an in-flight round, not a user turn.</summary>
+        private static bool IsPlumbing(string text) =>
+            text.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
+            || text.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal);
         private void UpdateFromChat(bool ignoreExisting = false)
         {
             if (_document == null) return;
@@ -626,68 +680,103 @@ namespace Gemineachy.Services
                 _busyTask = new TaskCompletionSource();
                 OnStateChanged?.Invoke();
             }
-            // chat-window > chat-window-content > div#chat-history > infinite-scroller > div.conversation-container#[a-f0-9]{16} > user-query, model-response, model-response-disclaimers
-            var node = _document.QuerySelector<HTMLDivElement>("chat-window infinite-scroller > div.conversation-container:last-child");
-            var keepNode = false;
-            if (node != null)
+            // New user messages = the ones not yet marked seen (usually none, so this stays cheap while a reply
+            // streams). Every one gets marked; only the LAST can start a turn.
+            var fresh = _document
+                .QuerySelectorAll<HTMLElement>($"{Site!.UserMessageSelector}:not([{SeenAttr}])")
+                .Using(o => o.ToArray());
+            HTMLElement? user = null;
+            for (int i = 0; i < fresh.Length; i++)
             {
-                var id = node.Id;
-                if (!string.IsNullOrEmpty(id) && !_processedConversationQuery.Contains(id))
-                {
-                    _processedConversationQuery.Add(id);
-                    if (ignoreExisting) return;
-                    // Query only the text-line paragraphs, skipping hidden accessibility labels
-                    var lineElements = node.QuerySelectorAll<HTMLElement>("user-query p.query-text-line").Using(o => o.ToArray());
-                    var queryLines = lineElements.Select(l => l.TextContent?.Trim()).Where(t => !string.IsNullOrEmpty(t));
-                    var query = string.Join(" ", queryLines).Trim();
-                    if (!string.IsNullOrEmpty(query))
-                    {
-                        keepNode = true;
-                        // Loop-guard reset only (hiding is handled by EarlyHideToolTraffic on every
-                        // mutation). Plumbing (tool results/manifest) is part of an in-flight round and
-                        // must NOT reset the guard; game prompts and real user turns DO (fresh round).
-                        bool isPlumbing = query.StartsWith(ToolProtocol.ResultsMarker, StringComparison.Ordinal)
-                                          || query.StartsWith(ToolProtocol.ManifestMarker, StringComparison.Ordinal);
-                        if (!isPlumbing) ResetToolLoop();
-                        var queryTCS = new TaskCompletionSource<string>();
-                        OnQuery?.Invoke(query, queryTCS.Task);
-                        void completionCheck()
-                        {
-                            var isProcessing = IsProcessing();
-                            if (isProcessing) return;
-                            OnDOMMutation -= completionCheck;
-                            // Read the whole message body via TextContent, NOT innerText and NOT a join
-                            // of <p> elements. TextContent includes code blocks and, crucially, still
-                            // returns the text when the element is display:none - which it IS once
-                            // EarlyHideToolTraffic hides a tool-call response. innerText is layout-
-                            // dependent and returns "" for hidden elements, which silently blanked the
-                            // tool-call parse and stalled the game while tool calls were hidden. Our
-                            // delimiter-based parser («TOOL_CALL … ») does not need innerText's newlines.
-                            using var contentNode = node.QuerySelector<HTMLElement>("model-response [id*='model-response-message-content']");
-                            // Marked = code blocks wrapped in ToolProtocol's code-region marks, for the tool
-                            // parser (it must know what was fenced); everyone else gets the plain text.
-                            var markedResponse = ReadMessageText(contentNode);
-                            var modelResponse = ToolProtocol.StripCodeMarks(markedResponse);
-                            // (Hiding of tool-call responses happens in EarlyHideToolTraffic on every
-                            // mutation, so the block is hidden while streaming - not only once complete.)
-                            // handle tool calling
-                            _ = HandleAgentMessage(markedResponse);
-                            //
-                            queryTCS.TrySetResult(modelResponse);
-                            OnQueryResponse?.Invoke(query, modelResponse);
-                            node.Dispose();
-                        }
-                        OnDOMMutation += completionCheck;
-                        completionCheck();
-                    }
-                }
-                if (!keepNode) node?.Dispose();
+                fresh[i].SetAttribute(SeenAttr, "");
+                if (i == fresh.Length - 1 && !ignoreExisting) user = fresh[i];
+                else fresh[i].Dispose();
             }
+            if (user != null && !StartTurn(user)) user.Dispose();
             if (!isProcessing && _busyTask.Task.IsCompleted == false)
             {
                 _busyTask.TrySetResult();
                 OnStateChanged?.Invoke();
             }
+        }
+
+        /// <summary>
+        /// Track one new user turn: fire <see cref="OnQuery"/>, then - when its reply has finished - run the tool
+        /// calls in it and fire <see cref="OnQueryResponse"/>. Returns false (and takes no ownership of
+        /// <paramref name="user"/>) when the turn is not a live one.
+        /// </summary>
+        private bool StartTurn(HTMLElement user)
+        {
+            var site = Site!;
+            var query = site.ReadUserText(user);
+            // A RE-RENDER of the live turn's own user message, not a new turn: Gemini re-renders the whole
+            // conversation when a fresh chat gets its URL (/app -> /app/<id>, ~2 s after the first send), which
+            // drops our seen-marker. Measured 2026-10-12: treating it as a second turn left the first one
+            // following a DETACHED element forever, so the user's Query never returned, kept the send lock,
+            // and the tool results behind it timed out. Follow the new element instead.
+            if (_liveTurn != null && _liveTurn.Query == query)
+            {
+                Console.WriteLine($"[Gemineachy] live turn re-rendered; following the new element: {Trunc(query)}");
+                _liveTurn.User.Dispose();
+                _liveTurn.User = user;
+                return true;
+            }
+            // A reply that is ALREADY complete the first time we see its user message is history being rendered
+            // (the user opened an older chat, or the page re-rendered) - not a turn happening now. Processing it
+            // would re-run that chat's last tool calls. A live turn's user message always renders before its
+            // reply finishes streaming.
+            using (var existing = site.FindReply(user))
+            {
+                if (existing != null && site.IsReplyComplete(_document!, existing) && !IsProcessing())
+                {
+                    Console.WriteLine($"[Gemineachy] turn skipped (reply already complete at first sight): {Trunc(query)}");
+                    return false;
+                }
+            }
+            if (string.IsNullOrEmpty(query)) return false;
+            Console.WriteLine($"[Gemineachy] turn start: {Trunc(query)}");
+            // Loop-guard reset only (hiding is handled by EarlyHideToolTraffic on every mutation). Plumbing
+            // (tool results/manifest) is part of an in-flight round and must NOT reset the guard; game prompts
+            // and real user turns DO (fresh round).
+            if (!IsPlumbing(query)) ResetToolLoop();
+            // A different message while a turn is still pending means that turn is over without us seeing it
+            // finish (e.g. the user navigated). Resolve it so no Query can wait on it forever holding the lock.
+            if (_liveTurn != null)
+            {
+                Console.WriteLine($"[Gemineachy] turn superseded before it completed: {Trunc(_liveTurn.Query)}");
+                _liveTurn.Response.TrySetResult("");
+                _liveTurn.User.Dispose();
+            }
+            var turn = new LiveTurn { User = user, Query = query };
+            _liveTurn = turn;
+            OnQuery?.Invoke(query, turn.Response.Task);
+            CheckLiveTurn();
+            return true;
+        }
+
+        /// <summary>Complete the live turn once its reply has finished: run its tool calls, resolve its Query,
+        /// and fire <see cref="OnQueryResponse"/>. Runs on every mutation; cheap when nothing is pending.</summary>
+        private void CheckLiveTurn()
+        {
+            var turn = _liveTurn;
+            if (turn == null || Site == null || _document == null) return;
+            if (IsProcessing()) return;
+            using var reply = Site.FindReply(turn.User);
+            if (reply == null || !Site.IsReplyComplete(_document, reply)) return;
+            _liveTurn = null;
+            // Read the whole message body via TextContent, NOT innerText and NOT a join of <p> elements.
+            // TextContent includes code blocks and, crucially, still returns the text when the element is hidden -
+            // which it IS once EarlyHideToolTraffic hides a tool-call reply. innerText is layout-dependent and
+            // returns "" for hidden elements, which silently blanked the tool-call parse and stalled the game.
+            using var contentNode = Site.ReplyContent(reply);
+            // Marked = code blocks wrapped in ToolProtocol's code-region marks, for the tool parser (it must know
+            // what was fenced); everyone else gets the plain text.
+            var markedResponse = ReadMessageText(contentNode);
+            var modelResponse = ToolProtocol.StripCodeMarks(markedResponse);
+            _ = HandleAgentMessage(markedResponse);
+            turn.Response.TrySetResult(modelResponse);
+            OnQueryResponse?.Invoke(turn.Query, modelResponse);
+            turn.User.Dispose();
         }
         /// <summary>
         /// Read a model message as plain text, with every rendered code block reduced to the code itself.
@@ -708,20 +797,20 @@ namespace Gemineachy.Services
         /// costs no correctness if it never changes. The surrounding newlines put the code on its own
         /// lines, which TextContent's element-boundary-free concatenation would otherwise deny it.
         /// </remarks>
-        private static string ReadMessageText(HTMLElement? contentNode)
+        private string ReadMessageText(HTMLElement? contentNode)
         {
-            if (contentNode == null) return "";
+            if (contentNode == null || Site == null) return "";
             using var clone = contentNode.CloneNode<HTMLElement>(true);
             var pres = clone.QuerySelectorAll<HTMLElement>("pre").Using(o => o.ToArray());
             foreach (var pre in pres)
             {
                 using (pre)
                 {
-                    var code = pre.TextContent ?? "";
-                    // Replace the whole <code-block> when there is one; a bare <pre> is its own block. The
-                    // code-region marks tell ToolProtocol this text is VERBATIM (it came out of a code block,
-                    // not out of lossy markdown prose); callers that want plain text strip them.
-                    using var block = pre.Closest<HTMLElement>("code-block");
+                    var code = Site.ReadCodeText(pre);
+                    // Replace the site's whole code-block element when there is one; a bare <pre> is its own
+                    // block. The code-region marks tell ToolProtocol this text is VERBATIM (it came out of a
+                    // code block, not out of lossy markdown prose); callers that want plain text strip them.
+                    using var block = pre.Closest<HTMLElement>(Site.CodeBlockSelector);
                     (block ?? pre).TextContent = "\n" + ToolProtocol.CodeStart + code + ToolProtocol.CodeEnd + "\n";
                 }
             }
@@ -743,7 +832,9 @@ namespace Gemineachy.Services
             var verdict = "SKIP";
             try
             {
-                const string code = "using System;\nConsole.WriteLine(\"Hello, \\\"World\\\"!\");\n";
+                // Several lines AND a blank line: Duck.ai renders each line as its own span with no newline
+                // between them, so a one-line sample could never catch a lost line break.
+                const string code = "using System;\n\nvar xs = new List<int> { 1 };\nConsole.WriteLine(\"Hello, \\\"World\\\"!\");\n";
                 using var host = BuildCodeBlockReplica(code);
                 var payloads = ToolProtocol.ExtractPayloads(ReadMessageText(host), out var unfenced);
                 var got = payloads.TryGetValue("content", out var v) ? v : null;
@@ -763,31 +854,16 @@ namespace Gemineachy.Services
             catch (Exception ex) { Console.WriteLine($"[SCRAPETEST] could not write DOM marker: {ex.Message}"); }
         }
         private static string Escape(string? s) => s == null ? "(none)" : "\"" + s.Replace("\n", "\\n") + "\"";
-        /// <summary>Build a detached copy of Gemini's code-block DOM (as observed 2026-08-18) between
-        /// PAYLOAD markers, for <see cref="RunScrapeSelfTest"/>. Built node-by-node rather than via
-        /// innerHTML so it cannot trip the page's Trusted Types policy.</summary>
+        /// <summary>The site's own code-block replica (<see cref="IChatSite.BuildCodeBlockReplica"/>) between
+        /// PAYLOAD markers, for <see cref="RunScrapeSelfTest"/>. Built node-by-node rather than via innerHTML so
+        /// it cannot trip the page's Trusted Types policy.</summary>
         private HTMLElement BuildCodeBlockReplica(string code)
         {
             var doc = _document!;
             var host = doc.CreateElement<HTMLElement>("div");
             using var open = doc.CreateElement<HTMLElement>("p");
             open.TextContent = $"{ToolProtocol.PayloadOpen}:content»";
-            using var block = doc.CreateElement<HTMLElement>("code-block");
-            using var deco = doc.CreateElement<HTMLElement>("div");
-            deco.ClassName = "code-block-decoration header-formatted";
-            using var label = doc.CreateElement<HTMLElement>("span");
-            label.TextContent = "C#";               // the language label that leaked into written files
-            using var buttons = doc.CreateElement<HTMLElement>("div");
-            buttons.ClassName = "buttons";
-            buttons.TextContent = "content_copy";   // icon-ligature text, should never reach the payload
-            deco.AppendChild(label);
-            deco.AppendChild(buttons);
-            using var pre = doc.CreateElement<HTMLElement>("pre");
-            using var codeEl = doc.CreateElement<HTMLElement>("code");
-            codeEl.TextContent = code;
-            pre.AppendChild(codeEl);
-            block.AppendChild(deco);
-            block.AppendChild(pre);
+            using var block = Site!.BuildCodeBlockReplica(doc, code);
             using var close = doc.CreateElement<HTMLElement>("p");
             close.TextContent = $"{ToolProtocol.PayloadClose}:content»";
             host.AppendChild(open);
@@ -831,7 +907,11 @@ namespace Gemineachy.Services
                 // back" - was the turn read at all, how long was it, and did the call parse?
                 Console.WriteLine($"[Gemineachy] turn complete: {modelResponse.Length} chars, {calls.Count} call(s)"
                     + string.Concat(calls.Where(c => c.ParseError != null).Select(c => $" | parse error: {Trunc(c.ParseError!, 160)}")));
-                if (calls.Count == 0) return;
+                if (calls.Count == 0)
+                {
+                    _loopIdle.TrySetResult();   // a reply with no tool calls ends the round chain
+                    return;
+                }
 
                 if (_toolRounds >= MaxToolRounds)
                 {
@@ -952,13 +1032,16 @@ namespace Gemineachy.Services
         private async Task AttachFiles(IEnumerable<File> files)
         {
             if (_document == null || files == null || files.Count() == 0) return;
+            // Dormant capability, built against Gemini's uploader only.
+            if (Site is not GeminiSite)
+                throw new NotSupportedException($"File attachments are only implemented for Gemini, not {AgentName}.");
             // click the Upload button so the input[type="file"] will get attached to the dom
-            using var button = await QuerySelectorAsync<HTMLButtonElement>(UploadButtonSelector, 5000);
+            using var button = await QuerySelectorAsync<HTMLButtonElement>(GeminiSite.UploadButtonSelector, 5000);
             button.Click();
             // get input[type="file"]
-            using var fileInput = await QuerySelectorAsync<HTMLInputElement>(FilesInputSelector, 5000);
+            using var fileInput = await QuerySelectorAsync<HTMLInputElement>(GeminiSite.FilesInputSelector, 5000);
             // get the current attached count to compare against during loading
-            var attachmentCountBefore = _document.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.Length);
+            var attachmentCountBefore = _document.QuerySelectorAll<HTMLDivElement>(GeminiSite.FileAttachmentsSelector).Using(o => o.Length);
             // add files to input[type="file"]
             using var dataTransfer = new DataTransfer();
             foreach (var f in files)
@@ -997,7 +1080,7 @@ namespace Gemineachy.Services
                     return false;
                 }
                 // get the attachments
-                var attachments = d.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.ToArray());
+                var attachments = d.QuerySelectorAll<HTMLDivElement>(GeminiSite.FileAttachmentsSelector).Using(o => o.ToArray());
                 // Wait for the count to increase. We do NOT wait for a specific total: Gemini caps
                 // attachments (currently 10), so requesting more never reaches an "expected" count and
                 // would hang. Any increase past the previous count means our upload registered.
@@ -1067,6 +1150,14 @@ namespace Gemineachy.Services
             ArgumentNullException.ThrowIfNull(_document);
             // First genuine turn (from anyone): append the minimal "tools exist" note so Gemini won't
             // decline for lack of awareness. No-op on plumbing messages and after tools are introduced.
+            // First genuine message of a chat on a site that needs it: a hidden warm-up round first (see
+            // IChatSite.IntroduceWithWarmUp). If the model followed it, the tools are introduced and the user's
+            // message goes out as typed; if not, the note rides the message as on every other site.
+            if (Site?.IntroduceWithWarmUp == true && IsGenuineTurn(text) && ToolsNeedIntroducing())
+            {
+                if (await WarmUpAsync(cancellationToken)) text = $"{text}\n\n{ToolProtocol.BuildPostWarmUpHint()}";
+                else _protocolIntroduced = false;
+            }
             text = MaybeAttachFirstToolNote(text);
             if (string.IsNullOrEmpty(text) && (files == null || files.Count() == 0))
             {
@@ -1105,6 +1196,7 @@ namespace Gemineachy.Services
             // doesn't flash or grow/shrink the box. (Empty box during the response wait looks identical to
             // a normal empty box, so keeping it on across the response is fine.)
             SetToolSending(true);
+            _sendInFlight = true;
             try
             {
                 for (int attempt = 1; attempt <= MaxSendAttempts; attempt++)
@@ -1141,6 +1233,7 @@ namespace Gemineachy.Services
             finally
             {
                 SetToolSending(false);
+                _sendInFlight = false;
             }
         }
 
@@ -1160,21 +1253,13 @@ namespace Gemineachy.Services
             // no-op. Waiting per-attempt (not just once in Query) makes retries wait for readiness too.
             await WhileBusy.WaitAsync(ct);
 
-            using var inputElement = QuerySelector<HTMLDivElement>(TextInputSelector);
-            ArgumentNullException.ThrowIfNull(inputElement);
+            var site = Site!;
+            using var compose = QuerySelector<HTMLElement>(site.ComposeSelector);
+            ArgumentNullException.ThrowIfNull(compose);
 
-            if ((inputElement.TextContent ?? "") != text)
+            if (site.ReadCompose(compose) != text)
             {
-                inputElement.Focus();
-                inputElement.TextContent = text;
-                using var inputEvent = new InputEvent("input", new InputEventOptions
-                {
-                    Bubbles = true,
-                    Cancelable = true,
-                    InputType = "insertText",
-                    Data = text
-                });
-                inputElement.DispatchEvent(inputEvent);
+                site.WriteCompose(compose, text);
                 // Let the editor PROCESS the change before Send is clicked: cross a task boundary. Gemini's
                 // Quill editor syncs its model from the DOM after the current task, and its Send handler sends
                 // the MODEL. A/B measured 2026-10-12: textContent + click in the same task was never accepted
@@ -1193,14 +1278,12 @@ namespace Gemineachy.Services
                 await AttachFiles(fileList!);
             }
 
-            // Deterministic ready signal (verified via CDP against live Gemini): the Send button only
-            // exists once the compose box has content, and it appears already enabled - so "present" ==
-            // "clickable" (no separate disabled state, no timer needed). Wait for it to appear, then
-            // re-grab it fresh immediately before clicking: Angular re-renders the compose after a turn,
-            // and a button reference resolved a moment earlier can be detached, making Click() a silent
-            // no-op. A missed click is still caught by the accept-timeout + retry.
-            await QuerySelectorAsync<HTMLButtonElement>(SendButtonSelector, ct);
-            using var sendButton = QuerySelector<HTMLButtonElement>(SendButtonSelector);
+            // Wait for a CLICKABLE Send (Gemini: present = clickable; Duck.ai: present but disabled until the
+            // box has text), then re-grab it fresh immediately before clicking: a re-render after a turn can
+            // detach a reference resolved a moment earlier, making Click() a silent no-op. A missed click is
+            // still caught by the accept-timeout + retry.
+            using (await QuerySelectorAsync<HTMLElement>(site.SendButtonSelector, b => site.CanSend(b), ct)) { }
+            using var sendButton = QuerySelector<HTMLElement>(site.SendButtonSelector);
             sendButton?.Click();
         }
 
@@ -1223,8 +1306,8 @@ namespace Gemineachy.Services
             {
                 await QuerySelectorAsync(d =>
                 {
-                    using var input = d.QuerySelector<HTMLDivElement>(TextInputSelector);
-                    return string.IsNullOrEmpty(input?.TextContent) || SendTookEffect(turnsBefore);
+                    using var input = d.QuerySelector<HTMLElement>(Site!.ComposeSelector);
+                    return input == null || string.IsNullOrEmpty(Site.ReadCompose(input)) || SendTookEffect(turnsBefore);
                 }, acceptCts.Token);
                 return true;
             }
@@ -1236,18 +1319,20 @@ namespace Gemineachy.Services
 
         /// <summary>The send is in flight or done even if the compose box has not cleared yet. Checked again
         /// right before any retry, so a LATE acceptance is never answered with a second send.</summary>
-        private bool SendTookEffect(int turnsBefore) => StopButtonVisible() || TurnCount() > turnsBefore;
+        private bool SendTookEffect(int turnsBefore) => IsProcessing() || TurnCount() > turnsBefore;
 
         private int TurnCount() =>
-            _document?.QuerySelectorAll<HTMLDivElement>("chat-window infinite-scroller > div.conversation-container").Using(o => o.Length) ?? 0;
+            Site == null ? 0 : _document?.QuerySelectorAll<HTMLElement>(Site.UserMessageSelector).Using(o => o.Length) ?? 0;
 
         private int CurrentAttachmentCount() =>
-            _document?.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.Length) ?? 0;
+            Site is not GeminiSite ? 0
+            : _document?.QuerySelectorAll<HTMLDivElement>(GeminiSite.FileAttachmentsSelector).Using(o => o.Length) ?? 0;
 
         private string CurrentComposeText()
         {
-            using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
-            return input?.TextContent ?? "";
+            if (Site == null) return "";
+            using var input = QuerySelector<HTMLElement>(Site.ComposeSelector);
+            return input == null ? "" : Site.ReadCompose(input);
         }
 
         /// <summary>DEBUG: best-effort scan for a Gemini error toast/snackbar so failure logs can show it.</summary>
@@ -1275,17 +1360,10 @@ namespace Gemineachy.Services
         {
             try
             {
-                using var input = QuerySelector<HTMLDivElement>(TextInputSelector);
+                if (Site == null) return;
+                using var input = QuerySelector<HTMLElement>(Site.ComposeSelector);
                 if (input == null) return;
-                input.Focus();
-                input.TextContent = "";
-                using var ev = new InputEvent("input", new InputEventOptions
-                {
-                    Bubbles = true,
-                    Cancelable = true,
-                    InputType = "deleteContentBackward"
-                });
-                input.DispatchEvent(ev);
+                Site.WriteCompose(input, "");
                 await Task.Delay(1);
             }
             catch { /* best effort */ }
@@ -1318,13 +1396,20 @@ namespace Gemineachy.Services
         {
             ArgumentNullException.ThrowIfNull(_document);
             var ret = _document.QuerySelector<TNode>(selector);
-            if (ret == null)
+            // Wait when the element is missing OR present-but-not-yet-matching. (This returned at once for a
+            // present element whatever `where` said - harmless while every caller passed no `where`, wrong the
+            // moment Duck.ai's Send exists-but-disabled.)
+            if (ret == null || !(where?.Invoke(ret) ?? true))
             {
+                ret?.Dispose();
+                ret = null;
                 var tcs = new TaskCompletionSource();
                 void mutationCallback()
                 {
-                    ret = _document.QuerySelector<TNode>(selector);
-                    if (ret != null && (where?.Invoke(ret) ?? true)) tcs.TrySetResult();
+                    if (tcs.Task.IsCompleted) return;
+                    var found = _document.QuerySelector<TNode>(selector);
+                    if (found != null && (where?.Invoke(found) ?? true)) { ret = found; tcs.TrySetResult(); }
+                    else found?.Dispose();
                 }
                 OnDOMMutation += mutationCallback;
                 try

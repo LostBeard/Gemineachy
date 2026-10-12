@@ -9,7 +9,7 @@ namespace Gemineachy.Services
     /// End-to-end test of EVERY <see cref="FileSystemService"/> tool, run on demand from the Files app.
     /// </summary>
     /// <remarks>
-    /// Each step is a model message pushed through the real tool pipeline (<see cref="GeminiChatService.RunToolMessageAsync"/>:
+    /// Each step is a model message pushed through the real tool pipeline (<see cref="ChatAgentService.RunToolMessageAsync"/>:
     /// ParseCalls, the fenced/[Verbatim] bind, invocation) - built with the same code-region marks the page
     /// scraper produces - so it proves the path an agent's call actually takes, minus only the chat page.
     /// It works in a scratch folder under a silent OPFS mount and posts nothing to the conversation.
@@ -21,9 +21,9 @@ namespace Gemineachy.Services
     public class FsSelfTest
     {
         private readonly SpawnJSRuntime _js;
-        private readonly GeminiChatService _chat;
+        private readonly ChatAgentService _chat;
         private readonly FileSystemService _fs;
-        public FsSelfTest(SpawnJSRuntime js, GeminiChatService chat, FileSystemService fs)
+        public FsSelfTest(SpawnJSRuntime js, ChatAgentService chat, FileSystemService fs)
         {
             _js = js;
             _chat = chat;
@@ -85,6 +85,13 @@ namespace Gemineachy.Services
 
             Expect("WriteFile empty content", await Call("WriteFile", new() { ["path"] = $"{r}/a/empty.txt" }, ("content", "")), s => s.StartsWith("Wrote 0"));
             Expect("empty file is 0 bytes", await Call("GetInfo", new() { ["path"] = $"{r}/a/empty.txt" }), s => s.Contains(" 0 bytes"));
+
+            // \$ is written exactly as sent (it is legitimate in shell/regex/LaTeX) but the agent is told about it.
+            Expect("WriteFile reports \\$ without changing it", await Call("WriteFile", new() { ["path"] = $"{r}/a/dollar.sh" }, ("content", "echo \\$HOME costs \\$5\n")),
+                s => s.StartsWith("Wrote") && s.Contains("contains \\$ 2 times"));
+            await ExpectRead("\\$ text kept byte-exact", $"{r}/a/dollar.sh", "echo \\$HOME costs \\$5\n");
+            Expect("no \\$ note on ordinary text", await Call("WriteFile", new() { ["path"] = $"{r}/a/plain.txt" }, ("content", "price $5\n")),
+                s => s.StartsWith("Wrote") && !s.Contains("Note:"));
 
             Expect("unicode file name", await Call("WriteFile", new() { ["path"] = $"{r}/a/na\u00EFve file \u2713.txt" }, ("content", "\u00FC")), s => s.StartsWith("Wrote"));
             await ExpectRead("unicode file name reads back", $"{r}/a/na\u00EFve file \u2713.txt", "\u00FC");
@@ -164,11 +171,11 @@ namespace Gemineachy.Services
             return sb.ToString();
         }
 
-        private async Task<GeminiChatService.ToolResult> Raw(string tool, Dictionary<string, object?> args, bool fenced = true, params (string, string)[] payloads)
+        private async Task<ChatAgentService.ToolResult> Raw(string tool, Dictionary<string, object?> args, bool fenced = true, params (string, string)[] payloads)
         {
             var results = await _chat.RunToolMessageAsync(Message(tool, args, fenced, payloads));
             return results.Count == 1 ? results[0]
-                : new GeminiChatService.ToolResult { Tool = tool, Ok = false, Error = $"expected 1 parsed call, got {results.Count}" };
+                : new ChatAgentService.ToolResult { Tool = tool, Ok = false, Error = $"expected 1 parsed call, got {results.Count}" };
         }
 
         /// <summary>A fenced call; returns the tool's text, or "ERROR: ..." when the pipeline refused it.</summary>

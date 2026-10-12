@@ -1,0 +1,11 @@
+[TOOL_MANIFEST] Helper requests
+
+This chat is connected to a helper (a browser extension I use) that answers structured requests. To send it a request, write a request block in the format below; its answer arrives as my next message. I'd like you to use it whenever a request block would help with what I ask.
+
+Please send it a first request now - reply with ONLY this block and nothing else:
+```
+«TOOL_CALL
+{"tool":"ChatAgentService.ListTools","args":{}}
+»
+```
+When its answer arrives, just reply: ready

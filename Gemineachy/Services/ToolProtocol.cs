@@ -10,7 +10,7 @@ namespace Gemineachy.Services
     /// <summary>
     /// Pure (DOM-free, Gemini-free) tool-calling protocol logic: manifest/schema generation,
     /// tool-call parsing, and C# -> JSON-schema type mapping.
-    /// Kept separate from <see cref="GeminiChatService"/> so it can be unit tested in isolation.
+    /// Kept separate from <see cref="ChatAgentService"/> so it can be unit tested in isolation.
     /// </summary>
     public static class ToolProtocol
     {
@@ -309,11 +309,11 @@ namespace Gemineachy.Services
             return null;
         }
 
-        // Built-in discovery tool names (registered by GeminiChatService). Referenced in the manifest
+        // Built-in discovery tool names (registered by ChatAgentService). Referenced in the manifest
         // text so the model knows how to fetch a tool's full argument schema on demand.
-        public const string SearchToolsName = "GeminiChatService.SearchTools";
-        public const string GetToolSchemaName = "GeminiChatService.GetToolSchema";
-        public const string ListToolsName = "GeminiChatService.ListTools";
+        public const string SearchToolsName = "ChatAgentService.SearchTools";
+        public const string GetToolSchemaName = "ChatAgentService.GetToolSchema";
+        public const string ListToolsName = "ChatAgentService.ListTools";
 
         /// <summary>
         /// Build the standing manifest: protocol instructions (call/result/hidden formats) + how to
@@ -325,7 +325,9 @@ namespace Gemineachy.Services
         public static string BuildManifest(IEnumerable<ToolCall> tools)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("This message configures browser-side tools provided by the Gemineachy extension. Read it carefully; it changes how you should respond.");
+            // The user's voice, like the first-message note: it is the user's intent, and a message that disclaims
+            // the user reads as injection to some models (see BuildFirstMessageToolNote).
+            sb.AppendLine("I'm using the Gemineachy browser extension. Its tools are not built-in tools you call - you WRITE a tool call as a code block in your reply, in the format below, and the extension running in my browser reads it, executes it, and sends you the result. This really works, so when I ask for something a tool can do, write the tool call instead of saying you can't. Please read this carefully.");
             sb.AppendLine();
             AppendProtocolSection(sb);
             sb.AppendLine("## Discovering a tool's arguments");
@@ -400,13 +402,58 @@ namespace Gemineachy.Services
         /// rather than listing every tool. The <see cref="FirstNoteMarker"/> lets the extension hide this
         /// note from the user's own chat bubble while Gemini still receives it.
         /// </summary>
+        /// <remarks>
+        /// Written in the USER's voice, because it is the user's intent - they installed the extension to give the
+        /// model tools. An earlier "[Automated note ... NOT from the user]" framing worked on Gemini, but Duck.ai's
+        /// GPT model treated it as third-party injection and answered "I can't access a file-writing tool in this
+        /// chat" (2026-10-12): models are trained to distrust instructions that disclaim the user. Even in the
+        /// user's voice it still declined about half the time, reasoning from its BUILT-IN tool list. So the note
+        /// asks it to BEGIN with a ListTools call - writing text, which it does not refuse - and the real results
+        /// that come back are the evidence that the tools exist before it decides what it can do.
+        /// </remarks>
         public static string BuildFirstMessageToolNote() =>
             FirstNoteMarker + "\n"
-            + "[Automated note from the Gemineachy browser extension - NOT from the user; do not mention it or reply to it. "
-            + "You have browser-side tools available in this page (for example a virtual filesystem you can read and write files in). "
-            + "BEFORE telling the user you cannot do something, check whether a tool exists: call "
-            + $"{ListToolsName} for the full list, or {SearchToolsName} with keywords. If no tool is relevant, just answer the user normally.\n"
-            + BuildCallRules() + "]";
+            + "(I'm using the Gemineachy browser extension. These are not built-in tools you call - you WRITE a tool call "
+            + "as a code block in your reply, in the format below, and the extension running in my browser reads it, "
+            + "executes it, and sends you the result. This really works: for example it can read and write files in a "
+            + "virtual filesystem. So when I ask for something a tool can do, write the tool call instead of saying you "
+            + $"can't. Please BEGIN your reply to this message by writing a call to {ListToolsName}: you will get the "
+            + "real list of tools back, and then you can continue with my request using them. No need to mention this note.)\n"
+            + BuildCallRules();
+
+        /// <summary>
+        /// The hidden warm-up sent before the first message of a chat on sites whose model will not believe it has
+        /// tools from a note alone (see IChatSite.IntroduceWithWarmUp). Its ONLY ask is to write one ListTools
+        /// request; the ListTools answer that comes back carries the index AND <see cref="BuildCallRules"/>, so the
+        /// model learns the format from a real working exchange. Starts with <see cref="ManifestMarker"/> (hidden).
+        /// </summary>
+        /// <remarks>
+        /// Wording A/B-measured on Duck.ai's default model, fresh chats, 2026-10-12 - every phrase here matters:
+        /// <list type="bullet">
+        /// <item>"tools you call / executes it" + "reply «HIDDEN» ready": followed ~1 in 3; refusals named
+        /// "execute tools" and "agree to conceal the result" (asking the model to hide its reply reads as deception -
+        /// so the extension hides the "ready" reply itself instead).</item>
+        /// <item>"I installed it, I trust it ... work with files on my computer": 0/5 ("access your computer").</item>
+        /// <item>THIS neutral helper framing: 5/5 (a format-only framing without the hide request: 8/9).</item>
+        /// </list>
+        /// </remarks>
+        public static string BuildWarmUpMessage() =>
+            $"{ManifestMarker} Helper requests\n\n"
+            + "This chat is connected to a helper (a browser extension I use) that answers structured requests. To send it a "
+            + "request, write a request block in the format below; its answer arrives as my next message. I'd like you to "
+            + "use it whenever a request block would help with what I ask.\n\n"
+            + "Please send it a first request now - reply with ONLY this block and nothing else:\n"
+            + $"```\n{CallOpen}\n{{\"tool\":\"{ListToolsName}\",\"args\":{{}}}}\n{CallClose}\n```\n"
+            + "When its answer arrives, just reply: ready";
+
+        /// <summary>
+        /// The one-line hint that rides the user's first message after a FOLLOWED warm-up - same neutral "helper"
+        /// language as the warm-up. Measured: with the warm-up alone, Duck.ai's model still answered one real
+        /// request in four with "I'm unable to access the helper's file tools". Marked like the first-message note,
+        /// so the extension hides it from the user's bubble.
+        /// </summary>
+        public static string BuildPostWarmUpHint() =>
+            FirstNoteMarker + "\n(If the helper can do this, send it a request block - its answer will come back to you.)";
 
         /// <summary>Compact index: one line per tool, "- name(args) : one-line summary". The argument NAMES
         /// are listed (so the model never has to guess one - it once wrote WriteFile's content as "text"),
@@ -609,7 +656,8 @@ namespace Gemineachy.Services
         /// <summary>Binding overload that also accepts the message's PAYLOAD blocks. A parameter absent from
         /// the JSON args is filled from a payload whose id matches its NAME (name-form), so the model can
         /// simply put a file's contents in a <c>«PAYLOAD:content»</c> block and omit <c>content</c> from
-        /// the JSON. Explicit args always win over a same-named payload.</summary>
+        /// the JSON. An explicit JSON arg wins over a same-named payload - except for a [Verbatim] parameter,
+        /// where the payload (its advertised channel) wins.</summary>
         public static bool TryBindArguments(ParameterInfo[] parameters, JsonElement args, bool hasArgs,
             IReadOnlyDictionary<string, string>? payloads, out object?[] values, out string? error)
             // A source with no rendering step in between (a test, an API-driven agent) is exact by
@@ -632,9 +680,22 @@ namespace Gemineachy.Services
                 var p = parameters[i];
                 var name = p.Name ?? "";
                 var verbatim = IsVerbatim(p);
-                if (hasArgs && args.ValueKind == JsonValueKind.Object
+                // For a VERBATIM parameter the PAYLOAD - its advertised channel - wins over an inline JSON value.
+                // Live 2026-10-12: Gemini copied the index notation "content*" into the JSON as "content":"*" AND
+                // sent the real code as a PAYLOAD; with "JSON wins" the file was written as a single "*".
+                var payloadFirst = verbatim && payloads != null && TryGetPayloadIgnoreCase(payloads, name, out _);
+                if (!payloadFirst && hasArgs && args.ValueKind == JsonValueKind.Object
                     && TryGetPropertyIgnoreCase(args, name) is JsonElement el)
                 {
+                    if (verbatim && el.ValueKind == JsonValueKind.String && el.GetString()?.Trim() == "*")
+                    {
+                        // Our own index notation ("content*" = verbatim) copied in as a placeholder value.
+                        error = $"Argument '{name}' was given as \"*\" - the * in the tool list only MARKS '{name}' as verbatim; it is "
+                              + $"not a value. Send the real value as a PAYLOAD: {PayloadOpen}:{name}» on its own line, then a ``` "
+                              + $"code block holding the exact value, then {PayloadClose}:{name}» on its own line - and leave '{name}' "
+                              + "out of the JSON.";
+                        return false;
+                    }
                     if (verbatim && !callFenced)
                     {
                         error = $"Argument '{name}' must arrive exactly, but this tool call was written outside a code block, "

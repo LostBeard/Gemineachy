@@ -1,7 +1,7 @@
 @using Gemineachy.Games
 @using Gemineachy.Services
 @using System.Linq
-@inject GeminiChatService _geminiChatService
+@inject ChatAgentService _geminiChatService
 @implements IAsyncDisposable
 
 <div class="checkers-container">
@@ -16,7 +16,7 @@
         }
         @if (_thinking)
         {
-            <span class="thinking"> · Gemini is thinking…</span>
+            <span class="thinking"> · @_geminiChatService.AgentName is thinking…</span>
         }
     </div>
     <div class="board-grid">
@@ -47,7 +47,7 @@
         }
     </div>
     <div class="checkers-footer">
-        <span class="hint">You are Red · Gemini is Black</span>
+        <span class="hint">You are Red · @_geminiChatService.AgentName is Black</span>
         <button class="reset-btn" @onclick="ResetGame">New Game</button>
     </div>
 </div>

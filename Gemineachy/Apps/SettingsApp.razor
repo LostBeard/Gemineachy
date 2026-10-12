@@ -2,7 +2,7 @@
 @using Gemineachy.Services
 @attribute [App(Name = "Settings", Icon = "⚙️", Pinned = true, SingleInstance = true, Description = "Configure the Gemineachy extension")]
 @inherits AppBase
-@inject GeminiChatService Gemini
+@inject ChatAgentService Gemini
 
 <div class="settings-app">
     <div class="settings-section">
@@ -14,13 +14,13 @@
             </button>
         </div>
         <div class="setting-row">
-            <span class="setting-label">Re-send the tool manifest to Gemini</span>
+            <span class="setting-label">Re-send the tool manifest to @Gemini.AgentName</span>
             <button class="setting-btn" @onclick="ReintroduceTools" disabled="@_sending">
                 @(_sending ? "Sending…" : "Re-send")
             </button>
         </div>
     </div>
-    <div class="settings-footer">Gemineachy · tools for Gemini</div>
+    <div class="settings-footer">Gemineachy · tools for @Gemini.AgentName</div>
 </div>
 
 @code {

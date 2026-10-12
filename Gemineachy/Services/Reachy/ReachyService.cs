@@ -55,7 +55,7 @@ namespace Gemineachy.Services.Reachy
         private Task? _ready;
 
         private readonly SpawnJSRuntime _js;
-        private readonly GeminiChatService _gemini;
+        private readonly ChatAgentService _gemini;
         private readonly BrowserExtensionService _bes;
         private readonly SpeechService _speech;
         private readonly List<ReachyRobot> _robots = new();
@@ -83,7 +83,7 @@ namespace Gemineachy.Services.Reachy
         /// <summary>Log a tool result and return it (so each [AgentTool] records what the agent did).</summary>
         private string Done(string tool, ReachyRobot r, string result) { LogAction(tool, r.Name, result); return result; }
 
-        public ReachyService(SpawnJSRuntime js, GeminiChatService gemini, BrowserExtensionService bes, SpeechService speech)
+        public ReachyService(SpawnJSRuntime js, ChatAgentService gemini, BrowserExtensionService bes, SpeechService speech)
         {
             _js = js;
             _gemini = gemini;

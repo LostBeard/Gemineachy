@@ -47,7 +47,7 @@ else
     builder.Services.AddRazorUI();
 
     // Additional services
-    builder.Services.AddSingleton<GeminiChatService>();
+    builder.Services.AddSingleton<ChatAgentService>();
     // Filesystem service: registers its always-available tools at startup and restores persisted mounts.
     builder.Services.AddSingleton<FileSystemService>();
     // On-demand end-to-end test of every filesystem tool (Files app "🧪 Test tools").

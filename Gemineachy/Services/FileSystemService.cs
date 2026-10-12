@@ -26,7 +26,7 @@ namespace Gemineachy.Services
     /// (<c>navigator.storage.getDirectory()</c>) or a user-picked folder (<c>showDirectoryPicker()</c>).
     /// Folder handles can be persisted to IndexedDB (restored on reload; re-grant needs a user gesture).
     ///
-    /// Its tools register with <see cref="GeminiChatService"/> at startup so they are always available;
+    /// Its tools register with <see cref="ChatAgentService"/> at startup so they are always available;
     /// the agent navigates on demand (list -> read/write) rather than being handed the whole tree. A
     /// shared mounted folder can act as a DevComms channel between the user, this agent, and Gemini.
     /// </summary>
@@ -36,7 +36,7 @@ namespace Gemineachy.Services
         private Task? _ready;
 
         private readonly SpawnJSRuntime _js;
-        private readonly GeminiChatService _gemini;
+        private readonly ChatAgentService _gemini;
         private readonly List<FsMount> _mounts = new();
 
         private const string DB_NAME = "gemineachy_fs";
@@ -62,7 +62,7 @@ namespace Gemineachy.Services
             NotifyChanged();
         }
 
-        public FileSystemService(SpawnJSRuntime js, GeminiChatService gemini)
+        public FileSystemService(SpawnJSRuntime js, ChatAgentService gemini)
         {
             _js = js;
             _gemini = gemini;
@@ -281,7 +281,8 @@ namespace Gemineachy.Services
                     await ws.Write(content);
                     await ws.Close();
                 }
-                return $"Wrote {content.Length} chars to {VirtualFilePath.ToDisplay(segs)}{(append ? " (appended)" : "")}.";
+                return $"Wrote {content.Length} chars to {VirtualFilePath.ToDisplay(segs)}{(append ? " (appended)" : "")}."
+                     + EscapedDollarNote(content);
             }
             catch (Exception ex) { return $"Could not write {VirtualFilePath.ToDisplay(segs)}: {ex.Message}"; }
             finally { file.Dispose(); }
@@ -523,7 +524,8 @@ namespace Gemineachy.Services
                 await ws.Write(updated);      // JS String ref - content never enters .NET
                 await ws.Close();
                 var count = replaceAll ? n : 1;
-                return $"Edited {VirtualFilePath.ToDisplay(segs)}: replaced {count} occurrence{(count == 1 ? "" : "s")} of oldText.";
+                return $"Edited {VirtualFilePath.ToDisplay(segs)}: replaced {count} occurrence{(count == 1 ? "" : "s")} of oldText."
+                     + EscapedDollarNote(newText ?? "");
             }
             catch (Exception ex) { return $"Could not edit {VirtualFilePath.ToDisplay(segs)}: {ex.Message}"; }
             finally { text?.Dispose(); file.Dispose(); }
@@ -598,6 +600,22 @@ namespace Gemineachy.Services
                 finally { if (owns) dir.Dispose(); }
             }
             return sb.ToString().TrimEnd() + (st.Stopped ? "\n… (capped)" : "");
+        }
+
+        /// <summary>
+        /// A note for the agent when written text contains <c>\$</c>. Chat models whose page renders $...$ as
+        /// LaTeX learn to escape every <c>$</c>, and Gemini carried that habit INTO code blocks (live 2026-10-12:
+        /// <c>Console.WriteLine(\$"...")</c>, which does not compile). The text is written exactly as sent -
+        /// <c>\$</c> is legitimate in shell, regex and LaTeX, so it is never rewritten - but the agent is told,
+        /// so a habit can be corrected and an intended <c>\$</c> left alone.
+        /// </summary>
+        private static string EscapedDollarNote(string text)
+        {
+            int n = 0;
+            for (int i = text.IndexOf("\\$", StringComparison.Ordinal); i >= 0; i = text.IndexOf("\\$", i + 2, StringComparison.Ordinal)) n++;
+            return n == 0 ? ""
+                : $" Note: the text contains \\$ {n} time{(n == 1 ? "" : "s")}, written exactly as sent. If you escaped $ by habit, "
+                + "rewrite it: payload text is used exactly as the file should read, so a plain $ needs no backslash.";
         }
 
         // ---- Recursive walk helpers ------------------------------------------------------------------

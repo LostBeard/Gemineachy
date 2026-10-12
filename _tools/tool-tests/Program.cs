@@ -5,7 +5,7 @@
 //   dotnet run --project _tools/tool-tests -c Release
 //
 // The DOM half (scraping Gemini's rendered message, which is where the code-block chrome bug lived)
-// cannot run here - it is guarded in-browser by GeminiChatService.RunScrapeSelfTest, whose verdict is
+// cannot run here - it is guarded in-browser by ChatAgentService.RunScrapeSelfTest, whose verdict is
 // readable via CDP at document.documentElement.getAttribute('data-gem-scrapetest').
 using System.Reflection;
 using System.Text.Json;
@@ -21,7 +21,7 @@ void Check(string name, bool ok, string? detail = null)
 void Eq(string name, string? got, string? want) =>
     Check(name, got == want, $"got {Show(got)} want {Show(want)}");
 static string Show(string? s) => s == null ? "(null)" : "\"" + s.Replace("\n", "\\n").Replace("\r", "\\r") + "\"";
-// What the page scraper (GeminiChatService.ReadMessageText) makes of one rendered code block.
+// What the page scraper (ChatAgentService.ReadMessageText) makes of one rendered code block.
 static string Code(string text) => ToolProtocol.CodeStart + text + ToolProtocol.CodeEnd;
 
 // ---------------------------------------------------------------------------------------------
@@ -250,10 +250,32 @@ JsonElement Json(string s) => JsonDocument.Parse(s).RootElement.Clone();
     Check("argument names are case-insensitive", ok && (string?)v[0] == "/a", e);
 }
 {
+    // Non-verbatim parameter: an explicit JSON arg beats a same-named payload.
+    var noteParams = typeof(Sample).GetMethod(nameof(Sample.Note))!.GetParameters();
+    var payloads = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["text"] = "PAYLOADVALUE" };
+    var ok = ToolProtocol.TryBindArguments(noteParams, Json("{\"text\":\"JSONVALUE\"}"), true, payloads, out var v, out var e);
+    Eq("explicit JSON arg beats a same-named payload (non-verbatim)", (string?)v[0], "JSONVALUE");
+    Check("bind with both sources succeeds", ok, e);
+}
+{
+    // Verbatim parameter: the PAYLOAD - its advertised channel - wins over an inline JSON value.
     var payloads = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["content"] = "PAYLOADVALUE" };
     var ok = ToolProtocol.TryBindArguments(writeParams, Json("{\"path\":\"/a\",\"content\":\"JSONVALUE\"}"), true, payloads, out var v, out var e);
-    Eq("explicit JSON arg beats a same-named payload", (string?)v[1], "JSONVALUE");
-    Check("bind with both sources succeeds", ok, e);
+    Eq("verbatim param: payload beats inline JSON", ok ? (string?)v[1] : e, "PAYLOADVALUE");
+}
+{
+    // Gemini, live 2026-10-12: copied the index notation into the JSON as "content":"*" AND sent the PAYLOAD.
+    // The file was written as a single "*". The payload must win.
+    const string code = "using System;\nvar xs = new List<int>();\n";
+    var msg = "\n" + Code("«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/S.cs\",\"content\":\"*\"}}\n»\n«PAYLOAD:content»\n```csharp\n" + code)
+            + "\n«/PAYLOAD:content»";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    var ok = ToolProtocol.TryBindArguments(writeParams, c, out var v, out var e);
+    Eq("\"content\":\"*\" + PAYLOAD binds the payload", ok ? (string?)v[1] : e, code);
+    // "*" alone (no payload) is our notation leaking in as a value - refuse, never write "*".
+    var lone = ToolProtocol.ParseCalls(Code("«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/S.cs\",\"content\":\"*\"}}\n»"))[0];
+    var ok2 = ToolProtocol.TryBindArguments(writeParams, lone, out _, out var e2);
+    Check("\"content\":\"*\" without a payload is refused", !ok2 && e2 != null && e2.Contains("not a value"), e2);
 }
 {
     var ok = ToolProtocol.TryBindArguments(writeParams, Json("{\"path\":\"/a\"}"), true, out _, out var e);
@@ -400,4 +422,6 @@ public class Sample
     public string ReadFile(string path, int maxBytes = 65536) => "";
     [AgentTool("Attach labels.")]
     public string Tag(string[] names) => "";
+    [AgentTool("Leave a note.")]
+    public string Note(string text) => "";
 }

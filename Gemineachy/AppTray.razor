@@ -2,7 +2,7 @@
 @using Gemineachy.Games
 @using Gemineachy.Services
 @using SpawnDev.SpawnJS.JSObjects
-@inject GeminiChatService _geminiChatService
+@inject ChatAgentService _geminiChatService
 @implements IDisposable
 <div>
     <UiButton style="@(_extend ? "" : "opacity: 50%;")" OnClick="@(() => _extend = !_extend)">A</UiButton>
@@ -35,7 +35,7 @@
     bool _dialogOpen = false;
     bool _checkers = false;
 
-    // Tool dispatch is centralized in GeminiChatService (parse + invoke + reply). Components no
+    // Tool dispatch is centralized in ChatAgentService (parse + invoke + reply). Components no
     // longer parse responses themselves - they contribute tools to the registry. See CheckersBoard
     // for the register-on-mount / unregister-on-unmount pattern.
 

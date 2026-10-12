@@ -1,0 +1,1 @@
+Using your file tools: write a small C# file to /opfs/fstest/live/MathUtil.cs that defines a public static class MathUtil with a method Add(int a, int b) and a generic method Clamp<T>(T value, T min, T max) where T : IComparable<T>. Then use EditFile to rename the method Add to Sum. Then move the file to {PATH}. Finally read it back and show me the final contents.

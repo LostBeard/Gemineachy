@@ -12,13 +12,47 @@ Global rules: `D:\users\tj\Projects\CLAUDE.md`. Read those first.
 
 | harness | covers | last run |
 |---|---|---|
-| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 101/101 |
+| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 104/104 |
 | `_tools/checkers-tests` | `Games/CheckersGame.cs` | 45/45 |
 | `_tools/chess-tests` | `Games/ChessGame.cs` | 32/32 |
 
 Run: `cd _tools/<harness> && dotnet run -c Release`. They `<Compile Include>` the real production source directly (`..\..\Gemineachy\...`), so they test what ships - keep it that way.
 
 🔴 **Keep tooling IN the repo.** These harnesses were lost once already to a scratchpad wipe, and the tool pipeline's pure logic had zero tests until they were rewritten. A suite that does not exist silently stops being a regression gate.
+
+## Multi-site: `ChatAgentService` + one `IChatSite` adapter per chat site (2026-10-12)
+
+The tool loop (`Services/ChatAgentService.cs`, was GeminiChatService) is site-neutral. Everything about a
+page lives in `Services/Sites/`: `GeminiSite` (gemini.google.com), `DuckAiSite` (duck.ai). The page's
+host picks the adapter at startup; the manifest's `content_scripts.matches` decides where the extension
+runs. Ranked candidates for the next adapters, with measured signed-out behaviour, are in
+`..\Web-Agents.md` (outside the repo).
+
+Adding a site: probe it signed out with `_tools/site-probe.js`, `turns-probe.js` and a stream sampler
+(`stream-sample.js` / `duck-stream.js`). Then write the adapter, add the host to the manifest (match
+patterns only - never name sites in the description), and give it a `BuildCodeBlockReplica` that copies
+the site's REAL code-block DOM, so the always-on scrape self-test guards it. Every adapter member must be
+measured, not assumed:
+- **Completion**: an attribute flip (Gemini `aria-busy`, Duck `data-activeresponse`) - list it in
+  `WatchedAttributes`, or the MutationObserver never sees it.
+- **Code text**: Duck renders one span per line with NO newline between them, so `textContent` glues
+  lines together. Qwen's `<pre>` adds a label, line numbers and NBSPs. Override `ReadCodeText`.
+- **Compose**: React textareas need the PROTOTYPE value setter (`Reflect.Set(proto, "value", v, el)`).
+- **Note hiding**: Duck renders a message as many text nodes in one `<p>`, so blank them in place.
+- **Turns re-render**: Gemini re-renders every turn and drops our seen-marker. `ChatAgentService` keeps ONE
+  live turn and follows a same-text re-render, so a second turn must never start for it.
+- **Model adherence**: Gemini follows the tool note appended to the first message. Duck.ai's GPT model
+  declines it ("I can't write files from here") 4/4, so `IntroduceWithWarmUp` sends a hidden warm-up
+  first (wording A/B-measured; see `ToolProtocol.BuildWarmUpMessage`). A declined warm-up is retried
+  once in a fresh chat (`StartNewChat`), because the user's message is still held at that point. The
+  first real message then carries a one-line hidden hint (`BuildPostWarmUpHint`). Measured end to end on
+  fresh chats: 1/7 with the note alone, 5/5 with warm-up + hint. Never ask a model to hide its own reply -
+  that reads as deception and it refuses; the extension hides the reply itself.
+- **New chat**: "New chat" is in-page navigation, so the extension survives it. `ToolsNeedIntroducing()`
+  treats a conversation with no user messages as new, so the note or warm-up rides again.
+
+Test harnesses for any site: `repro-csharp.sh <out> <path> <msg> <site>`, `warmup-ab.sh` (wording A/B,
+fresh chats), Files app "🧪 Test tools" (FsSelfTest, per origin - each site has its own OPFS).
 
 ## 🔴 Only code blocks are exact - `[Verbatim]` + code-region marks (2026-10-12)
 
@@ -42,6 +76,9 @@ into `"`. The JSON stayed valid, so the corruption was silent.
   silently never run.
 - **Probe the chat tab while it is the ACTIVE tab.** A hidden tab is throttled (timers about 1/s, no animation
   frames). Opening `chrome://extensions` hides it, and `_tools/reload-all.sh` re-activates it afterwards.
+  Windows also hides a COVERED window (occlusion tracking), so launch the debug Chrome with
+  `_tools/launch-debug-chrome.ps1` - it disables that and keeps probes deterministic while TJ works in front
+  of it. Switching TABS still hides a tab, so real hidden-tab behaviour stays testable on purpose.
   Send acceptance = compose cleared OR Stop showing OR a new turn, and it is re-checked before any retry, so a
   slow accept is never answered with a second send.
 
