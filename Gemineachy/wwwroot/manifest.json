@@ -16,6 +16,8 @@
     "https://gemini.google.com/*",
     "https://duck.ai/*",
     "https://chatgpt.com/*",
+    "https://chat.z.ai/*",
+    "https://chat.qwen.ai/*",
     "http://*.local/*"
   ],
   "optional_host_permissions": [
@@ -26,7 +28,9 @@
       "matches": [
         "https://gemini.google.com/*",
         "https://duck.ai/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://chat.z.ai/*",
+        "https://chat.qwen.ai/*"
       ],
       "js": [
         "app/content.js"
@@ -44,6 +48,18 @@
         "app/content.js"
       ],
       "all_frames": false
+    },
+    {
+      "matches": [
+        "https://chat.z.ai/*",
+        "https://chat.qwen.ai/*"
+      ],
+      "js": [
+        "app/page-bridge.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -52,6 +68,8 @@
         "https://gemini.google.com/*",
         "https://duck.ai/*",
         "https://chatgpt.com/*",
+        "https://chat.z.ai/*",
+        "https://chat.qwen.ai/*",
         "https://www.google.com/*"
       ],
       "resources": [

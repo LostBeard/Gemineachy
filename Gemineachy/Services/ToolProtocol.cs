@@ -91,11 +91,27 @@ namespace Gemineachy.Services
         public const char CodeStart = '';
         public const char CodeEnd = '';
 
+        /// <summary>Placed inside a code region by the scraper when the page rendered that code block only in part
+        /// (a virtualizing editor keeps just the lines near the viewport in the DOM). Its text is NOT the whole
+        /// block, so a payload or call holding this mark is refused instead of run on truncated text.</summary>
+        public const char CodeIncomplete = '';
+
         /// <summary>Remove the scraper's code-region marks (see <see cref="CodeStart"/>).</summary>
         public static string StripCodeMarks(string? text) =>
-            string.IsNullOrEmpty(text) || text.IndexOfAny(new[] { CodeStart, CodeEnd }) < 0
+            string.IsNullOrEmpty(text) || text.IndexOfAny(new[] { CodeStart, CodeEnd, CodeIncomplete }) < 0
                 ? text ?? ""
-                : text.Replace(CodeStart.ToString(), "").Replace(CodeEnd.ToString(), "");
+                : text.Replace(CodeStart.ToString(), "").Replace(CodeEnd.ToString(), "").Replace(CodeIncomplete.ToString(), "");
+
+        /// <summary>Lines per part the model is asked for when a code block could not be read in full. The
+        /// smallest editor that virtualizes (Qwen's Monaco) keeps about 38 lines rendered.</summary>
+        public const int IncompleteChunkLines = 30;
+
+        /// <summary>The error for a call whose code arrived only in part (see <see cref="CodeIncomplete"/>).</summary>
+        public static string IncompleteCodeError(string what) =>
+            $"{what} was in a code block too long for this chat page to show in full - the page only renders part of a "
+            + "long code block, so it could not be read exactly, and nothing was run. Send the value in parts of at most "
+            + $"{IncompleteChunkLines} lines, one tool call per part (for a file: WriteFile with the first part, then "
+            + "WriteFile with append=true for each next part).";
 
         /// <summary>The marked code regions of a scraped message, as (index of CodeStart, index of CodeEnd).</summary>
         private static List<(int Start, int End)> CodeRegions(string text)
@@ -196,6 +212,23 @@ namespace Gemineachy.Services
             return map;
         }
 
+        /// <summary>True when [from, to) overlaps a code region the page rendered only in part (one holding
+        /// <see cref="CodeIncomplete"/>). The mark sits at the region's start, which a call or payload inside
+        /// that block need not include, so overlap with the REGION is what counts.</summary>
+        private static bool TouchesIncomplete(string text, List<(int Start, int End)> regions, int from, int to) =>
+            regions.Any(g => g.Start < to && g.End >= from && text.IndexOf(CodeIncomplete, g.Start, g.End - g.Start) >= 0);
+
+        /// <summary>The id of the first PAYLOAD block that touches an incomplete code region, or null.</summary>
+        private static string? IncompletePayloadId(string text)
+        {
+            if (text.IndexOf(CodeIncomplete) < 0) return null;
+            var regions = CodeRegions(text);
+            foreach (Match m in PayloadBlockRegex.Matches(text))
+                if (TouchesIncomplete(text, regions, m.Index, m.Index + m.Length))
+                    return (m.Groups["id"].Success ? m.Groups["id"].Value : "").Trim();
+            return null;
+        }
+
         /// <summary>Strip the single leading/trailing line break the markers sit on, then - if the body is
         /// still wrapped in a ``` code fence (i.e. the renderer left the fence backticks in the text
         /// instead of consuming them) - remove that wrapping fence too. What remains is the exact value.</summary>
@@ -238,6 +271,7 @@ namespace Gemineachy.Services
             if (string.IsNullOrEmpty(responseText)) return calls;
             // Payloads are message-level: extract once, share with every call in the message.
             var payloads = ExtractPayloads(responseText, out var unfencedPayloads);
+            var incompletePayload = IncompletePayloadId(responseText);
             var regions = CodeRegions(responseText);
             foreach (Match m in CallRegex.Matches(responseText))
             {
@@ -245,6 +279,10 @@ namespace Gemineachy.Services
                 var fenced = IsFenced(responseText, regions, body.Index, body.Index + body.Length);
                 var raw = StripCodeMarks(body.Value).Trim();
                 var call = new ParsedCall { Raw = raw, Payloads = payloads, Fenced = fenced, UnfencedPayloads = unfencedPayloads };
+                // Truncated text must never run. A payload is message-level (any call may bind it), so one
+                // incomplete payload refuses every call in the message.
+                if (TouchesIncomplete(responseText, regions, body.Index, body.Index + body.Length)) { call.ParseError = IncompleteCodeError("This tool call"); calls.Add(call); continue; }
+                if (incompletePayload != null) { call.ParseError = IncompleteCodeError($"{PayloadOpen}:{incompletePayload}»"); calls.Add(call); continue; }
                 try
                 {
                     using var doc = JsonDocument.Parse(raw);
@@ -492,7 +530,8 @@ namespace Gemineachy.Services
             + $"{PayloadOpen}:argName»\n"
             + "then a ``` code block holding the exact value - written exactly as the file should read, escaping NOTHING (not quotes, not backslashes, not $) - then\n"
             + $"{PayloadClose}:argName»\n"
-            + "each marker on its own line OUTSIDE the code block. If the value itself contains ``` lines (a Markdown file, for example), open and close its code block with four backticks (````).";
+            + "each marker on its own line OUTSIDE the code block. The call's code block and the value's code block are SEPARATE - "
+            + "never put one inside the other (a ``` line inside a code block ends it). If the value itself contains ``` lines (a Markdown file, for example), open and close its code block with four backticks (````).";
 
         /// <summary>First sentence (or a trimmed prefix) of a description, on a single line.</summary>
         private static string OneLine(string? s, int max = 160)
@@ -723,7 +762,11 @@ namespace Gemineachy.Services
                               + "page's markdown rendering, which silently strips text such as <...>, backslashes and *emphasis*. "
                               + $"Resend it with the exact value inside ONE ``` code block between {PayloadOpen}:{name}» and "
                               + $"{PayloadClose}:{name}». If the value itself contains ``` lines, open and close its code block "
-                              + "with four backticks (````) instead.";
+                              + "with four backticks (````) instead. Never put a code block INSIDE another one: a ``` line inside "
+                              + "a code block ENDS that block, so the value falls out into markdown (measured on Z.ai: one block "
+                              + "holding the call, the opening marker and a ```csharp line). The layout is three separate parts:\n"
+                              + $"```\n{CallOpen}\n{{\"tool\":\"...\",\"args\":{{...}}}}\n{CallClose}\n```\n"
+                              + $"{PayloadOpen}:{name}»\n```\n(the exact value)\n```\n{PayloadClose}:{name}»";
                         return false;
                     }
                     try

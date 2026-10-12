@@ -20,7 +20,7 @@ namespace Gemineachy.Services
     public class ChatAgentService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
     {
         /// <summary>Adapters for every supported chat site. The page's host picks one at startup.</summary>
-        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS), new ChatGptSite(JS), new GoogleAiModeSite(JS) };
+        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS), new ChatGptSite(JS), new GoogleAiModeSite(JS), new ZaiSite(JS), new QwenSite(JS) };
         /// <summary>The chat site this page is, or null on a page Gemineachy has no adapter for.</summary>
         public IChatSite? Site { get; private set; }
         /// <summary>Display name of the chat agent on this page ("Gemini", "Duck.ai"), or "the chat agent".</summary>
@@ -558,7 +558,7 @@ namespace Gemineachy.Services
 
         private async Task SendInterceptedAsync(string userMsg)
         {
-            try { await Query(userMsg); } // Query attaches the tool note (first genuine turn) and marks introduced
+            try { await Query(userMsg, ResponseTimeoutMs); } // Query attaches the tool note (first genuine turn) and marks introduced
             catch (Exception ex) { Console.WriteLine($"[Gemineachy] intercepted first send failed: {ex.GetType().Name}: {ex.Message}"); }
             finally { _firstSendHandled = false; }
         }
@@ -797,16 +797,42 @@ namespace Gemineachy.Services
         /// costs no correctness if it never changes. The surrounding newlines put the code on its own
         /// lines, which TextContent's element-boundary-free concatenation would otherwise deny it.
         /// </remarks>
+        /// <summary>The event the page-world bridge (wwwroot/page-bridge.js) answers, and the attribute it answers in.</summary>
+        const string PageCodeEvent = "gemineachy-read-code";
+        const string PageCodeAttr = "data-gemineachy-code";
         private string ReadMessageText(HTMLElement? contentNode)
         {
             if (contentNode == null || Site == null) return "";
+            // Virtualizing editors keep only part of a long block in the DOM: ask the page-world bridge to copy each
+            // block's exact text onto its element first, so the clone carries it. Removed from the live page after.
+            var live = Site.ReadsCodeFromPage
+                ? contentNode.QuerySelectorAll<HTMLElement>(Site.CodeSelector).Using(o => o.ToArray())
+                : System.Array.Empty<HTMLElement>();
+            foreach (var el in live)
+            {
+                using var ask = new Event(PageCodeEvent, new EventOptions { Bubbles = true });
+                el.DispatchEvent(ask);
+            }
             using var clone = contentNode.CloneNode<HTMLElement>(true);
-            var pres = clone.QuerySelectorAll<HTMLElement>("pre").Using(o => o.ToArray());
+            foreach (var el in live) using (el) el.RemoveAttribute(PageCodeAttr);
+            if (Site.ExcludeSelector is string exclude)
+            {
+                var drop = clone.QuerySelectorAll<HTMLElement>(exclude).Using(o => o.ToArray());
+                foreach (var d in drop) using (d) d.Remove();
+            }
+            var pres = clone.QuerySelectorAll<HTMLElement>(Site.CodeSelector).Using(o => o.ToArray());
             foreach (var pre in pres)
             {
                 using (pre)
                 {
-                    var code = Site.ReadCodeText(pre);
+                    // The bridge's exact text when it answered; otherwise the DOM's, marked CodeIncomplete when the
+                    // page rendered only part of the block, so the protocol refuses it.
+                    var code = pre.GetAttribute(PageCodeAttr);
+                    if (code == null)
+                    {
+                        code = Site.ReadCodeText(pre);
+                        if (!Site.IsCodeComplete(pre)) code = ToolProtocol.CodeIncomplete + code;
+                    }
                     // Replace the site's whole code-block element when there is one; a bare <pre> is its own
                     // block. The code-region marks tell ToolProtocol this text is VERBATIM (it came out of a
                     // code block, not out of lossy markdown prose); callers that want plain text strip them.
@@ -871,6 +897,10 @@ namespace Gemineachy.Services
             host.AppendChild(close);
             return host;
         }
+        /// <summary>How long the tool loop's own sends (results, nudges, the intercepted first message) wait for the
+        /// model's REPLY. Thinking models are slow: Z.ai's GLM took over 60 s to answer a tool result (2026-10-12), and
+        /// the old 60 s wait then logged a delivered result as "failed to deliver".</summary>
+        public double ResponseTimeoutMs { get; set; } = 300000;
         /// <summary>Max consecutive automatic tool rounds before we stop, to guard against a
         /// tool-call loop between the extension and Gemini. Reset by <see cref="ResetToolLoop"/>.</summary>
         public int MaxToolRounds { get; set; } = 8;
@@ -916,7 +946,7 @@ namespace Gemineachy.Services
                 if (_toolRounds >= MaxToolRounds)
                 {
                     _toolRounds = 0;
-                    await Query($"{ToolProtocol.ResultsMarker} Tool-call loop guard tripped after {MaxToolRounds} consecutive rounds; not executing further tool calls. Please continue without calling tools, or ask the user how to proceed.");
+                    await Query($"{ToolProtocol.ResultsMarker} Tool-call loop guard tripped after {MaxToolRounds} consecutive rounds; not executing further tool calls. Please continue without calling tools, or ask the user how to proceed.", ResponseTimeoutMs);
                     return;
                 }
 
@@ -926,7 +956,7 @@ namespace Gemineachy.Services
                 if (_lastRoundFailed && sig == _lastRoundSig)
                 {
                     _toolRounds++;
-                    await Query($"{ToolProtocol.ResultsMarker} That tool call is identical to the previous one, which failed with the same error - re-sending it will not change the result. Read the error above and change the call before retrying (check the tool name, the required argument names, and their values). Arguments may be passed nested as {{\"tool\":\"Name\",\"args\":{{...}}}} or flat as {{\"tool\":\"Name\",\"argName\":value}}. If a value is code or long text, send it VERBATIM as a {ToolProtocol.PayloadOpen}:argName» … {ToolProtocol.PayloadClose}:argName» code block and omit it from the JSON.");
+                    await Query($"{ToolProtocol.ResultsMarker} That tool call is identical to the previous one, which failed with the same error - re-sending it will not change the result. Read the error above and change the call before retrying (check the tool name, the required argument names, and their values). Arguments may be passed nested as {{\"tool\":\"Name\",\"args\":{{...}}}} or flat as {{\"tool\":\"Name\",\"argName\":value}}. If a value is code or long text, send it VERBATIM as a {ToolProtocol.PayloadOpen}:argName» … {ToolProtocol.PayloadClose}:argName» code block and omit it from the JSON.", ResponseTimeoutMs);
                     return;
                 }
                 _toolRounds++;
@@ -943,7 +973,7 @@ namespace Gemineachy.Services
                 _lastRoundFailed = anyFailed;
                 var json = FitResultsToSite(results);
                 Console.WriteLine($"[Gemineachy] sending results for {results.Count} call(s), {results.Count(r => !r.Ok)} failed");
-                await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json);
+                await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json, ResponseTimeoutMs);
                 Console.WriteLine("[Gemineachy] results delivered");
             }
             catch (Exception ex)

@@ -84,8 +84,26 @@ namespace Gemineachy.Services.Sites
         /// <paramref name="marker"/> on. Must be idempotent - it runs on every DOM mutation.</summary>
         void HideFirstNote(HTMLElement userMessage, string marker, string hiddenAttr);
 
-        /// <summary>The exact code text of a rendered code block's &lt;pre&gt;.</summary>
+        /// <summary>The element holding a rendered code block's text: &lt;pre&gt; on most sites, an editor's content
+        /// element where the site renders code in an editor (Z.ai: CodeMirror's <c>.cm-content</c>).</summary>
+        string CodeSelector => "pre";
+
+        /// <summary>Elements inside a reply that are NOT the answer (Z.ai's "Thought Process" panel), removed from
+        /// the scraped copy before it is read, or null when there are none.</summary>
+        string? ExcludeSelector => null;
+
+        /// <summary>The exact code text of a rendered code block's <see cref="CodeSelector"/> element.</summary>
         string ReadCodeText(HTMLElement pre);
+
+        /// <summary>True when the page-world bridge (wwwroot/page-bridge.js, listed for this site in the manifest) can
+        /// read this site's code blocks exactly from the page's own editor objects. The scraper then asks it first
+        /// and uses the DOM reading (<see cref="ReadCodeText"/>) only when the bridge has no answer.</summary>
+        bool ReadsCodeFromPage => false;
+
+        /// <summary>False when the page rendered only PART of this code block (a virtualizing editor shows the lines
+        /// near the viewport), so <see cref="ReadCodeText"/> cannot return all of it. The tool protocol then refuses
+        /// any payload from it rather than write a silently truncated file.</summary>
+        bool IsCodeComplete(HTMLElement code) => true;
 
         /// <summary>A DETACHED replica of one rendered code block holding <paramref name="code"/>, built the way
         /// this site renders it (chrome included), for the always-on scrape self-test.</summary>

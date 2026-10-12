@@ -165,6 +165,21 @@ var wfParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters
     Check("code marks never reach Raw", !c.Raw.Contains(ToolProtocol.CodeStart) && !c.Raw.Contains(ToolProtocol.CodeEnd), c.Raw);
 }
 {
+    // A virtualizing editor (Qwen's Monaco, a visible Z.ai CodeMirror) rendered only part of the payload's
+    // code block: the scraper marks the region CodeIncomplete, and the call must be refused, never run.
+    var msg = Code("«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}}\n»")
+            + "\n«PAYLOAD:content»\n" + Code(ToolProtocol.CodeIncomplete + "line 1\nline 2") + "\n«/PAYLOAD:content»";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    Check("call with an INCOMPLETE payload is refused", c.ParseError != null && c.ParseError.Contains("append=true"), c.ParseError);
+    // Markers inside the incomplete block, the mark at the block's start - still refused.
+    var inside = Code(ToolProtocol.CodeIncomplete + "«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}}\n»\n«PAYLOAD:content»\nx\n«/PAYLOAD:content»");
+    Check("call inside an INCOMPLETE block is refused", ToolProtocol.ParseCalls(inside)[0].ParseError != null);
+    // A complete block next to an incomplete one that holds no payload or call: the call runs.
+    var other = Code("«TOOL_CALL\n{\"tool\":\"X\",\"args\":{}}\n»") + "\nsee:\n" + Code(ToolProtocol.CodeIncomplete + "long sample");
+    Check("incomplete block elsewhere does not block a call", ToolProtocol.ParseCalls(other)[0].ParseError == null);
+    Eq("StripCodeMarks removes the incomplete mark", ToolProtocol.StripCodeMarks(Code(ToolProtocol.CodeIncomplete + "a")), "a");
+}
+{
     // A non-verbatim argument (a path, a chess move) is accepted from an unfenced call - refusing those
     // would only cost round-trips.
     var msg = "«TOOL_CALL {\"tool\":\"FileSystemService.ReadFile\",\"args\":{\"path\":\"/opfs/a.txt\"}} »";

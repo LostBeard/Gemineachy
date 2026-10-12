@@ -33,6 +33,25 @@ window.__gemSite = (() => {
       // Signed out, the "New chat" link opens a login modal; a page load is the only way to a fresh chat.
       newChat: () => { location.href = 'https://chatgpt.com/'; },
     },
+    'chat.qwen.ai': {   // user and assistant live in SIBLING .qwen-chat-message-select-turn blocks
+      user: '.qwen-chat-message-user', reply: '.qwen-chat-message-assistant',
+      compose: 'textarea.message-input-textarea', send: 'button[aria-label="Send"]',
+      busy: () => !!q('button[aria-label="Stop"]'),
+      userText: u => ((u.querySelector('p.user-message-content') || u).textContent || '').trim(),
+      replyOf: u => u.closest('.qwen-chat-message-select-turn')?.nextElementSibling?.querySelector('.qwen-chat-message-assistant') || null,
+      body: r => r.querySelector('.response-message-content') || r,
+      newChat: () => { location.href = 'https://chat.qwen.ai/'; },
+    },
+    'chat.z.ai': {   // messages are div[id^=message-] blocks; the Send button is REMOVED while a reply streams
+      user: 'div.user-message', reply: '.chat-assistant',
+      compose: 'textarea#chat-input', send: 'button#send-message-button',
+      busy: () => !q('button#send-message-button'),
+      userText: u => (u.textContent || '').trim(),
+      // each message has its OWN wrapper div: walk all messages in document order, not siblings
+      replyOf: u => { const ms = [...document.querySelectorAll('div[id^="message-"]:not([id$="-start"])')]; for (let j = ms.indexOf(u) + 1; j > 0 && j < ms.length; j++) { if (ms[j].matches('div.user-message')) return null; const a = ms[j].querySelector('.chat-assistant'); if (a) return a; } return null; },
+      body: r => r.querySelector('#response-content-container') || r,
+      newChat: () => { location.href = 'https://chat.z.ai/'; },
+    },
     'www.google.com': {   // AI Mode (udm=50): queries are NOT inside their turns - query i pairs with turn i
       user: 'span[role="heading"][aria-level="2"]', reply: '[data-scope-id="turn"]',
       compose: 'textarea[maxlength="8192"]', send: 'button[data-xid="input-plate-send-button"]',

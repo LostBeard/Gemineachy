@@ -12,7 +12,7 @@ Global rules: `D:\users\tj\Projects\CLAUDE.md`. Read those first.
 
 | harness | covers | last run |
 |---|---|---|
-| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 104/104 |
+| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 113/113 |
 | `_tools/checkers-tests` | `Games/CheckersGame.cs` | 45/45 |
 | `_tools/chess-tests` | `Games/ChessGame.cs` | 32/32 |
 
@@ -23,7 +23,8 @@ Run: `cd _tools/<harness> && dotnet run -c Release`. They `<Compile Include>` th
 ## Multi-site: `ChatAgentService` + one `IChatSite` adapter per chat site (2026-10-12)
 
 The tool loop (`Services/ChatAgentService.cs`, was GeminiChatService) is site-neutral. Everything about a
-page lives in `Services/Sites/`: `GeminiSite` (gemini.google.com), `DuckAiSite` (duck.ai). The page's
+page lives in `Services/Sites/`: `GeminiSite` (gemini.google.com), `DuckAiSite` (duck.ai), `ChatGptSite`,
+`GoogleAiModeSite` (google.com udm=50 only), `ZaiSite` (chat.z.ai), `QwenSite` (chat.qwen.ai). The page's
 host picks the adapter at startup; the manifest's `content_scripts.matches` decides where the extension
 runs. Ranked candidates for the next adapters, with measured signed-out behaviour, are in
 `..\Web-Agents.md` (outside the repo).
@@ -37,6 +38,14 @@ measured, not assumed:
   `WatchedAttributes`, or the MutationObserver never sees it.
 - **Code text**: Duck renders one span per line with NO newline between them, so `textContent` glues
   lines together. Qwen's `<pre>` adds a label, line numbers and NBSPs. Override `ReadCodeText`.
+- **Code in an editor** (Z.ai CodeMirror, Qwen Monaco): set `CodeSelector` to the editor's content element
+  and join its line elements. These editors VIRTUALIZE long blocks, so the exact text comes from the page-world
+  bridge `wwwroot/page-bridge.js` (`ReadsCodeFromPage`; the one raw-JS file, TJ-approved 2026-10-12, read-only).
+  The DOM reading is the fallback: report a partly rendered block through `IsCodeComplete` - the protocol then
+  refuses it and asks for 30-line parts. Never return partial text as whole.
+- **Not-the-answer parts of a reply** (Z.ai's "Thought Process" panel inside the body): `ExcludeSelector`.
+- **Pairing**: don't assume a reply is the user message's sibling. Z.ai wraps every message in its own div,
+  so `FindReply` walks all messages in document order.
 - **Compose**: React textareas need the PROTOTYPE value setter (`Reflect.Set(proto, "value", v, el)`).
 - **Note hiding**: Duck renders a message as many text nodes in one `<p>`, so blank them in place.
 - **Turns re-render**: Gemini re-renders every turn and drops our seen-marker. `ChatAgentService` keeps ONE

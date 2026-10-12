@@ -20,7 +20,11 @@
   const mo = new MutationObserver(recs => {
     for (const r of recs) {
       if (r.type !== 'attributes' || r.attributeName === 'style') continue;
-      const el = r.target; let v = el.getAttribute(r.attributeName);
+      const el = r.target;
+      // Animations (Lottie spinners) rewrite SVG transforms every frame - pure noise for adapter study.
+      if (el instanceof SVGElement) continue;
+      if (/^data-(spm|aplus)/.test(r.attributeName)) continue;   // analytics tags
+      let v = el.getAttribute(r.attributeName);
       if (r.attributeName === 'class') v = (v || '').split(/\s+/).filter(c => /stream|load|busy|pending|typing|anim|generat|done|complete/i.test(c)).join(' ');
       if (r.attributeName === 'class' && !v) continue;
       const key = `${sig(el)} ${r.attributeName}=${(v ?? 'null').slice(0, 60)}`;
