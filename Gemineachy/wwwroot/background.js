@@ -27,7 +27,7 @@ function attachToEvent(target, tempCb) {
 }
 // .Net will (SHOULD) call this method after it has finished starting and initializing all service that implement IBackgroundService and IAsyncBackgroundService
 function finalizeAsyncStartup() {
-    if (!asyncStartupRunning) return;
+    if (!asyncStartupRunning) return [];
     asyncStartupRunning = false;
     var ret = holding;
     console.log(`finalizeAsyncStartup called`, holding.length, holding);

@@ -306,7 +306,7 @@ namespace Gemineachy.Services
                 {
                     long existing = await file.GetSize();
                     using var ws = await file.CreateWritable(new FileSystemCreateWritableOptions { KeepExistingData = true });
-                    await ws.Seek((ulong)existing);
+                    await ws.Seek(existing);
                     await ws.Write(content);
                     await ws.Close();
                 }

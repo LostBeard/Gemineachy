@@ -91,16 +91,18 @@ namespace Gemineachy.Services.Reachy
                 Console.WriteLine($"[STT] accelerator: {AcceleratorName}");
 
                 using var hub = new ModelHub(_js);
-                var encoderBytes = await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "onnx/encoder_model.onnx");
-                var encoder = InferenceSession.CreateFromFile(_accelerator, encoderBytes);
-                var decoderBytes = await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "onnx/decoder_model.onnx");
-                var decoder = InferenceSession.CreateFromFile(_accelerator, decoderBytes);
+                // Weights stream from the OPFS cache straight to the GPU - never a whole-model byte[] on the
+                // single-threaded WASM heap (the obsolete ModelHub.LoadAsync path did exactly that).
+                var encoder = await InferenceSession.CreateFromHuggingFaceAsync(
+                    _accelerator, hub, ModelHub.KnownModels.WhisperTiny, "onnx/encoder_model.onnx");
+                var decoder = await InferenceSession.CreateFromHuggingFaceAsync(
+                    _accelerator, hub, ModelHub.KnownModels.WhisperTiny, "onnx/decoder_model.onnx");
                 // With-past decoder = O(n) decode instead of O(n^2). It is a separate ~113MB download, but
                 // OPFS-cached like the rest, so it costs one cold start and every utterance after is cheaper.
-                var withPastBytes = await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "onnx/decoder_with_past_model.onnx");
-                var decoderWithPast = InferenceSession.CreateFromFile(_accelerator, withPastBytes);
+                var decoderWithPast = await InferenceSession.CreateFromHuggingFaceAsync(
+                    _accelerator, hub, ModelHub.KnownModels.WhisperTiny, "onnx/decoder_with_past_model.onnx");
                 var tokenizerJson = System.Text.Encoding.UTF8.GetString(
-                    await hub.LoadAsync(ModelHub.KnownModels.WhisperTiny, "tokenizer.json"));
+                    await hub.LoadSmallFileAsync(ModelHub.KnownModels.WhisperTiny, "tokenizer.json"));
 
                 var pipeline = new SpeechRecognitionPipeline(encoder, decoder, _accelerator, decoderWithPast)
                 {
@@ -222,7 +224,7 @@ namespace Gemineachy.Services.Reachy
                     // COMPLETE transcript from one cut short by a token cap - the self-test only checks for
                     // one expected word, so a truncated result still reported PASS. Publish the full text so
                     // that is checkable from outside.
-                    docEl.SetAttribute("data-gem-stttext", outcome.Text ?? "");
+                    docEl.SetAttribute("data-gem-stttext", outcome.Text);
                 }
                 catch (Exception ex) { Console.WriteLine($"[STT] dump marker failed: {ex.Message}"); }
 
