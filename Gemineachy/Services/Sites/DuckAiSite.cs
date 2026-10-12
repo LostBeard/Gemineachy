@@ -60,24 +60,10 @@ namespace Gemineachy.Services.Sites
         private readonly SpawnJSRuntime _js;
         public DuckAiSite(SpawnJSRuntime js) => _js = js;
 
-        public string ReadCompose(HTMLElement compose)
-        {
-            using var ta = compose.JSRefCopy<HTMLTextAreaElement>();
-            return ta.Value ?? "";
-        }
+        public string ReadCompose(HTMLElement compose) => SiteDom.TextAreaValue(compose);
 
-        public void WriteCompose(HTMLElement compose, string text)
-        {
-            compose.Focus();
-            // React tracks a controlled textarea's value through a property it installs on the ELEMENT, so a plain
-            // `el.value = x` updates that tracker too and React then sees "no change" and drops the input event.
-            // Calling the PROTOTYPE's value setter with the element as receiver bypasses the tracker - the same
-            // thing a real keystroke does - so the input event below reaches React's onChange.
-            using var proto = _js.Get<SpawnJSObject>("HTMLTextAreaElement.prototype");
-            Reflect.Set(proto, "value", text, compose);
-            using var inputEvent = new Event("input", new EventOptions { Bubbles = true, Cancelable = true });
-            compose.DispatchEvent(inputEvent);
-        }
+        // React-controlled textarea: see SiteDom.SetTextAreaValue.
+        public void WriteCompose(HTMLElement compose, string text) => SiteDom.SetTextAreaValue(_js, compose, text);
 
         public bool CanSend(HTMLElement sendButton)
         {
@@ -103,45 +89,20 @@ namespace Gemineachy.Services.Sites
 
         public bool IsGenerating(Document document)
         {
-            if (StopVisible(document)) return true;
+            if (SiteDom.Visible(document, StopButtonSelector)) return true;
             using var streaming = document.QuerySelector("[data-activeresponse=\"false\"]");
             return streaming != null;
         }
 
         public bool IsReplyComplete(Document document, HTMLElement reply) =>
-            reply.GetAttribute("data-activeresponse") == "true" && !StopVisible(document);
+            reply.GetAttribute("data-activeresponse") == "true" && !SiteDom.Visible(document, StopButtonSelector);
 
         public void HideFirstNote(HTMLElement userMessage, string marker, string hiddenAttr)
         {
             // One <p> holds every line, but React renders it as MANY text nodes - one per line with "\n" nodes
-            // between (measured: 26 nodes, the marker in the 4th). Blank out the note IN PLACE, nodeValue only:
-            // cut the marker's node at the marker, empty every node after it, and empty the blank lines before
-            // it. React keeps references to these nodes and only ever rewrites their values, so no structure
-            // changes under it. Idempotent - once trimmed the marker is gone.
+            // between (measured: 26 nodes, the marker in the 4th). SiteDom.BlankFromMarker handles that shape.
             using var p = userMessage.QuerySelector<HTMLElement>("p");
-            if (p == null) return;
-            using var nodes = p.ChildNodes;
-            var texts = new List<Text>();
-            try
-            {
-                for (int i = 0; i < nodes.Length; i++)
-                {
-                    var n = nodes.Item<Text>(i);
-                    if (n.NodeType == 3) texts.Add(n); else n.Dispose();
-                }
-                int idx = texts.FindIndex(t => (t.Data ?? "").Contains(marker, StringComparison.Ordinal));
-                if (idx < 0) return;
-                var d0 = texts[idx].Data ?? "";
-                texts[idx].Data = d0.Substring(0, d0.IndexOf(marker, StringComparison.Ordinal));
-                for (int j = idx + 1; j < texts.Count; j++) texts[j].Data = "";
-                for (int j = idx; j >= 0; j--)
-                {
-                    var d = texts[j].Data ?? "";
-                    if (d.Trim().Length == 0) texts[j].Data = "";
-                    else { texts[j].Data = d.TrimEnd(); break; }
-                }
-            }
-            finally { foreach (var t in texts) t.Dispose(); }
+            if (p != null) SiteDom.BlankFromMarker(p, marker);
         }
 
         /// <summary>
@@ -194,12 +155,5 @@ namespace Gemineachy.Services.Sites
             return block;
         }
 
-        private static bool StopVisible(Document document)
-        {
-            using var stop = document.QuerySelector<HTMLElement>(StopButtonSelector);
-            if (stop == null) return false;
-            using var rect = stop.GetBoundingClientRect();
-            return rect.Width > 0 && rect.Height > 0;
-        }
     }
 }

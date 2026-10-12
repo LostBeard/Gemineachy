@@ -20,7 +20,7 @@ namespace Gemineachy.Services
     public class ChatAgentService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
     {
         /// <summary>Adapters for every supported chat site. The page's host picks one at startup.</summary>
-        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS) };
+        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS), new ChatGptSite(JS) };
         /// <summary>The chat site this page is, or null on a page Gemineachy has no adapter for.</summary>
         public IChatSite? Site { get; private set; }
         /// <summary>Display name of the chat agent on this page ("Gemini", "Duck.ai"), or "the chat agent".</summary>

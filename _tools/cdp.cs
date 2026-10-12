@@ -76,9 +76,17 @@ if (shotMode) { shotOut = args[2]; args = new[] { args[1], "1" }; }
 // focus. A/B against a script-dispatched Enter/click: a page that ignores untrusted events reacts only to this.
 bool enterMode = args[0] == "--enter";
 if (enterMode) args = new[] { args[1], "1" };
+// --click <urlSubstr> <x> <y>: a TRUSTED left click (Input.dispatchMouseEvent) at viewport coordinates. A/B against
+// a script .click(): some controls only honour trusted input.
+bool clickMode = args[0] == "--click";
+string clickX = "0", clickY = "0";
+if (clickMode) { clickX = args[2]; clickY = args[3]; args = new[] { args[1], "1" }; }
 string sub = args[0];
 // Note: a leading '@' would be swallowed by dotnet's response-file expansion, so use file: instead.
-string js = consoleMode ? "" : args[1].StartsWith("file:") ? File.ReadAllText(args[1].Substring(5)) : args[1];
+// file:a.js+b.js concatenates the files into ONE evaluation (e.g. site-table.js + a probe that uses it).
+string js = consoleMode ? "" : args[1].StartsWith("file:")
+    ? string.Join(";\n", args[1].Substring(5).Split('+').Select(File.ReadAllText))
+    : args[1];
 int timeoutMs = consoleMode ? int.Parse(args[1]) * 1000 : args.Length > 2 ? int.Parse(args[2]) : 60000;
 string? consoleFilter = consoleMode && args.Length > 2 ? args[2] : null;
 
@@ -137,6 +145,20 @@ async Task<JsonDocument> Recv()
     return JsonDocument.Parse(sb.ToString());
 }
 
+if (clickMode)
+{
+    var at = $"\"x\":{clickX},\"y\":{clickY},\"button\":\"left\",\"clickCount\":1";
+    await Send("{\"id\":7,\"method\":\"Input.dispatchMouseEvent\",\"params\":{\"type\":\"mouseMoved\"," + at + "}}");
+    await Send("{\"id\":8,\"method\":\"Input.dispatchMouseEvent\",\"params\":{\"type\":\"mousePressed\"," + at + "}}");
+    await Send("{\"id\":9,\"method\":\"Input.dispatchMouseEvent\",\"params\":{\"type\":\"mouseReleased\"," + at + "}}");
+    for (int got = 0; got < 3;)
+    {
+        using var msg = await Recv();
+        if (msg.RootElement.TryGetProperty("id", out _)) got++;
+    }
+    Console.WriteLine($"clicked {clickX},{clickY}");
+    return 0;
+}
 if (enterMode)
 {
     await Send("{\"id\":7,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"rawKeyDown\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"nativeVirtualKeyCode\":13}}");

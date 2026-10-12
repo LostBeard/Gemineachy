@@ -1,0 +1,5 @@
+Study probe: reply with one short sentence, then exactly one fenced code block (language csharp) containing exactly these four lines, including the blank line, and nothing else:
+using System;
+
+var d = new Dictionary<string, List<int>>();
+var s = "a\"b";

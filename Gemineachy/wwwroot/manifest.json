@@ -15,6 +15,7 @@
   "host_permissions": [
     "https://gemini.google.com/*",
     "https://duck.ai/*",
+    "https://chatgpt.com/*",
     "http://*.local/*"
   ],
   "optional_host_permissions": [
@@ -24,7 +25,8 @@
     {
       "matches": [
         "https://gemini.google.com/*",
-        "https://duck.ai/*"
+        "https://duck.ai/*",
+        "https://chatgpt.com/*"
       ],
       "js": [
         "app/content.js"
@@ -36,7 +38,8 @@
     {
       "matches": [
         "https://gemini.google.com/*",
-        "https://duck.ai/*"
+        "https://duck.ai/*",
+        "https://chatgpt.com/*"
       ],
       "resources": [
         "app/*"

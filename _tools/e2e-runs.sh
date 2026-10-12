@@ -9,8 +9,9 @@ SITE="$1"; RUNS="$2"; OUT="$3"; PREFIX="$4"; MSG="${5:-repro-csharp.txt}"
 mkdir -p "$OUT"
 bash reload-all.sh "$SITE" > /dev/null
 for n in $(seq 1 "$RUNS"); do
-  dotnet run cdp.cs "$SITE" "(()=>{const b=[...document.querySelectorAll('a,button,[role=button]')].find(e=>/new chat/i.test((e.textContent||'')+(e.getAttribute('aria-label')||'')) && !/voice/i.test(e.textContent||''));if(b){b.click();return 'new chat'}return 'none'})()" > /dev/null 2>&1
+  dotnet run cdp.cs "$SITE" file:site-table.js+new-chat-any.js > /dev/null 2>&1
   sleep 2
+  dotnet run cdp.cs "$SITE" file:site-table.js+wait-ready.js 60000 > /dev/null 2>&1
   bash repro-csharp.sh "$OUT/run$n" "fstest/${PREFIX}$n.cs" "$MSG" "$SITE" > /dev/null 2>&1
   python -c "
 import json,sys
