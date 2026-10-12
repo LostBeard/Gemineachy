@@ -12,13 +12,38 @@ Global rules: `D:\users\tj\Projects\CLAUDE.md`. Read those first.
 
 | harness | covers | last run |
 |---|---|---|
-| `_tools/tool-tests` | `ToolProtocol`, `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute` | 76/76 |
+| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 101/101 |
 | `_tools/checkers-tests` | `Games/CheckersGame.cs` | 45/45 |
 | `_tools/chess-tests` | `Games/ChessGame.cs` | 32/32 |
 
 Run: `cd _tools/<harness> && dotnet run -c Release`. They `<Compile Include>` the real production source directly (`..\..\Gemineachy\...`), so they test what ships - keep it that way.
 
 🔴 **Keep tooling IN the repo.** These harnesses were lost once already to a scratchpad wipe, and the tool pipeline's pure logic had zero tests until they were rewritten. A suite that does not exist silently stops being a regression gate.
+
+## 🔴 Only code blocks are exact - `[Verbatim]` + code-region marks (2026-10-12)
+
+Outside a code block, the chat page's markdown rendering silently DROPS text, and the scraped text cannot
+show what is missing. Live repro: a C# `WriteFile` turned `List<int>` into `List` (tag-stripped) and `\"`
+into `"`. The JSON stayed valid, so the corruption was silent.
+- `ReadMessageText` wraps every code block's text in `ToolProtocol.CodeStart`/`CodeEnd` (private-use chars).
+  The protocol uses them to know what was fenced. Everyone else gets `StripCodeMarks(...)`.
+- A tool parameter carrying code/exact text is marked `[Verbatim]`. It binds ONLY from a code block (a fenced
+  call or a fenced PAYLOAD); otherwise the call fails with an error telling the model how to resend.
+- The first-message note, `ListTools` and the schema lookups all carry `BuildCallRules()`, because a model that
+  reaches a tool via the note + `ListTools` never sees the full manifest. The index lists argument names
+  (`WriteFile(path, content*, append?)`) so the model stops guessing them.
+
+## 🔴 Driving Gemini's page - three measured traps (2026-10-12)
+
+- **Set text, then cross a task boundary before clicking Send** (`await Task.Delay(1)`). Quill syncs its
+  model after the current task, and Send sends the model. A same-task click was never accepted (0/2).
+- **A turn is done only when nothing in it is `aria-busy="true"`**, not merely when Stop disappears. Stop went
+  away about 2 s before streaming ended, the turn was read at 68 chars, and a correct `WriteFile` call was
+  silently never run.
+- **Probe the chat tab while it is the ACTIVE tab.** A hidden tab is throttled (timers about 1/s, no animation
+  frames). Opening `chrome://extensions` hides it, and `_tools/reload-all.sh` re-activates it afterwards.
+  Send acceptance = compose cleared OR Stop showing OR a new turn, and it is re-checked before any retry, so a
+  slow accept is never answered with a second send.
 
 ## 🔴 Scraping the LLM reply out of the rendered DOM
 

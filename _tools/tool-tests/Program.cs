@@ -21,6 +21,8 @@ void Check(string name, bool ok, string? detail = null)
 void Eq(string name, string? got, string? want) =>
     Check(name, got == want, $"got {Show(got)} want {Show(want)}");
 static string Show(string? s) => s == null ? "(null)" : "\"" + s.Replace("\n", "\\n").Replace("\r", "\\r") + "\"";
+// What the page scraper (GeminiChatService.ReadMessageText) makes of one rendered code block.
+static string Code(string text) => ToolProtocol.CodeStart + text + ToolProtocol.CodeEnd;
 
 // ---------------------------------------------------------------------------------------------
 Console.WriteLine("== ExtractPayloads ==");
@@ -121,16 +123,118 @@ Check("no call blocks - empty list", ToolProtocol.ParseCalls("just prose").Count
         calls.Count == 2 && calls[0].Payloads?["content"] == "CODE" && calls[1].Payloads?["content"] == "CODE");
 }
 {
-    // Real shape: a WriteFile call whose content rides the payload channel.
+    // Real shape: a WriteFile call whose content rides the payload channel. The scraper wraps each code
+    // block's text in the code-region marks (S..E), which is what makes the payload count as fenced.
     const string code = "class P { static void Main() { System.Console.WriteLine(\"hi\"); } }\n";
     var msg = "«TOOL_CALL {\"tool\":\"FileSystemService.WriteFile\",\"args\":{\"path\":\"/opfs/P.cs\"}} »\n"
-            + $"«PAYLOAD:content»\n{code}\n«/PAYLOAD:content»";
+            + $"«PAYLOAD:content»\n{Code(code)}\n«/PAYLOAD:content»";
     var calls = ToolProtocol.ParseCalls(msg);
     var ps = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters();
-    var ok = ToolProtocol.TryBindArguments(ps, calls[0].Args, calls[0].HasArgs, calls[0].Payloads, out var vals, out var err);
+    var ok = ToolProtocol.TryBindArguments(ps, calls[0], out var vals, out var err);
     Check("end-to-end: call + name-form payload binds", ok, err);
     Eq("end-to-end: path bound from JSON", (string?)vals[0], "/opfs/P.cs");
     Eq("end-to-end: content bound verbatim from payload", (string?)vals[1], code);
+}
+
+// ---------------------------------------------------------------------------------------------
+Console.WriteLine("== Fencing / [Verbatim] ==");
+// A scraped chat reply is markdown rendered to DOM. Outside a code block that rendering silently loses
+// text: the live 2026-10-12 repro turned List<int> into List and \" into ". These pin that a [Verbatim]
+// parameter only ever binds a value that came out of a code block.
+var wfParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters();
+{
+    // The silent case from the live repro: unfenced call, JSON still VALID after <int> was stripped.
+    var msg = "«TOOL_CALL {\"tool\":\"FileSystemService.WriteFile\",\"args\":{\"path\":\"/opfs/S.cs\",\"content\":\"var d = new Dictionary<string, List>();\"}} »";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    Check("unfenced call is reported unfenced", c.ParseError == null && !c.Fenced, c.ParseError);
+    var ok = ToolProtocol.TryBindArguments(wfParams, c, out _, out var e);
+    Check("verbatim arg from an UNFENCED call is refused", !ok && e != null && e.Contains("content") && e.Contains("PAYLOAD"), e);
+}
+{
+    // The same call inside a code block is exact, so inline JSON content is fine there.
+    var json = "{\"tool\":\"FileSystemService.WriteFile\",\"args\":{\"path\":\"/opfs/S.cs\",\"content\":\"List<int> x; s = \\\"q\\\";\"}}";
+    var c = ToolProtocol.ParseCalls(Code($"«TOOL_CALL\n{json}\n»"))[0];
+    Check("call inside a code block is fenced", c.ParseError == null && c.Fenced, c.ParseError);
+    var ok = ToolProtocol.TryBindArguments(wfParams, c, out var v, out var e);
+    Eq("fenced inline content binds exactly", ok ? (string?)v[1] : e, "List<int> x; s = \"q\";");
+}
+{
+    // Call marker in prose, JSON alone in a code block - still exact.
+    var c = ToolProtocol.ParseCalls("«TOOL_CALL " + Code("{\"tool\":\"X\",\"args\":{}}") + " »")[0];
+    Check("JSON that IS one code block counts as fenced", c.ParseError == null && c.Fenced, c.ParseError ?? c.Raw);
+    Check("code marks never reach Raw", !c.Raw.Contains(ToolProtocol.CodeStart) && !c.Raw.Contains(ToolProtocol.CodeEnd), c.Raw);
+}
+{
+    // A non-verbatim argument (a path, a chess move) is accepted from an unfenced call - refusing those
+    // would only cost round-trips.
+    var msg = "«TOOL_CALL {\"tool\":\"FileSystemService.ReadFile\",\"args\":{\"path\":\"/opfs/a.txt\"}} »";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    var ok = ToolProtocol.TryBindArguments(typeof(Sample).GetMethod(nameof(Sample.ReadFile))!.GetParameters(), c, out var v, out var e);
+    Check("plain arg from an unfenced call still binds", ok && (string?)v[0] == "/opfs/a.txt", e);
+}
+{
+    // Payload body written as prose (no code block): unfenced, so a verbatim param refuses it.
+    var msg = "«TOOL_CALL {\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}} »\n«PAYLOAD:content»\nvar d = new Dictionary<string, List>();\n«/PAYLOAD:content»";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    Check("prose payload is reported unfenced", c.UnfencedPayloads != null && c.UnfencedPayloads.Contains("content"));
+    var ok = ToolProtocol.TryBindArguments(wfParams, c, out _, out var e);
+    Check("verbatim arg from an UNFENCED payload is refused", !ok && e != null && e.Contains("four backticks"), e);
+}
+{
+    // Payload markers INSIDE the code block (model fenced the whole thing) - exact, so fenced.
+    const string code = "line <a>\n\\\"b\\\"\n";
+    var msg = "«TOOL_CALL {\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}} »\n" + Code($"«PAYLOAD:content»\n{code}\n«/PAYLOAD:content»");
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    var ok = ToolProtocol.TryBindArguments(wfParams, c, out var v, out var e);
+    Eq("payload with markers inside the code block binds exactly", ok ? (string?)v[1] : e, code);
+}
+{
+    // The exact shape Gemini produced live (2026-10-12): ONE outer fence around the call and the payload's
+    // opening marker; the inner ```csharp line left literal; the inner closing ``` closed the OUTER block;
+    // the payload's closing marker in prose. The code is exact - it must bind, minus the literal fence line.
+    const string code = "using System;\nvar d = new Dictionary<string, List<int>>();\nConsole.WriteLine($\"a\\\"b\");\n";
+    // ReadMessageText puts the code block on its own lines: "\n" + marks + <pre> text + "\n".
+    var msg = "\n" + Code("«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}}\n»\n«PAYLOAD:content»\n```csharp\n" + code)
+            + "\n«/PAYLOAD:content»";
+    var c = ToolProtocol.ParseCalls(msg)[0];
+    Check("Gemini's outer-fence shape: call fenced", c.ParseError == null && c.Fenced, c.ParseError);
+    var ok = ToolProtocol.TryBindArguments(wfParams, c, out var v, out var e);
+    Eq("Gemini's outer-fence shape: content exact, literal ```csharp line dropped", ok ? (string?)v[1] : e, code);
+}
+{
+    // Empty code block = an empty value, still fenced (an empty file is legitimate).
+    var p = ToolProtocol.ExtractPayloads("«PAYLOAD:content»\n" + Code("") + "\n«/PAYLOAD:content»", out var unf);
+    Check("empty code-block payload is fenced and empty", p["content"] == "" && !unf.Contains("content"), Show(p["content"]));
+}
+{
+    // Prose glued to a code block inside one payload: NOT fenced (the prose part went through rendering).
+    ToolProtocol.ExtractPayloads("«PAYLOAD:content»\nsome prose\n" + Code("x") + "\n«/PAYLOAD:content»", out var unf);
+    Check("payload of prose + code block is unfenced", unf.Contains("content"));
+}
+{
+    // A Markdown file with its own ``` fences, sent with a 3-backtick outer fence, renders as SEVERAL code
+    // blocks with prose between them - the body is no longer one code block, and must be refused.
+    var msg = "«PAYLOAD:content»\n" + Code("# Title") + "\nsome *prose*\n" + Code("x = 1") + "\n«/PAYLOAD:content»";
+    ToolProtocol.ExtractPayloads(msg, out var unf);
+    Check("payload split across code blocks + prose is unfenced", unf.Contains("content"));
+}
+{
+    var msg = "«PAYLOAD:content»\n" + Code("abc\n") + "\n«/PAYLOAD:content»";
+    var p = ToolProtocol.ExtractPayloads(msg, out var unf);
+    // "abc\n" is the code block's OWN text, so its trailing newline is part of the value (see the
+    // "trailing newline preserved" case above); only the marker lines' newlines are stripped.
+    Check("fenced payload value carries no code marks", p["content"] == "abc\n" && !unf.Contains("content"), Show(p["content"]));
+    Eq("StripCodeMarks removes both marks", ToolProtocol.StripCodeMarks(Code("x")), "x");
+    Eq("StripCodeMarks leaves plain text alone", ToolProtocol.StripCodeMarks("plain"), "plain");
+}
+{
+    var c = ToolProtocol.ParseCalls("«TOOL_CALL {\"tool\":\"X\",\"args\":{\"a\":\"say \"hi\"\"}} »")[0];
+    Check("unfenced invalid JSON error says to use a code block", c.ParseError != null && c.ParseError.Contains("code block"), c.ParseError);
+}
+{
+    // The trusted overload (no rendering step in between, e.g. a test or an API agent) is unaffected.
+    var ok = ToolProtocol.TryBindArguments(wfParams, Json("{\"path\":\"/a\",\"content\":\"c\"}"), true, out _, out var e);
+    Check("trusted-source bind still accepts inline verbatim", ok, e);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -236,6 +340,17 @@ ToolCall Tool(string method, string desc)
     var note = ToolProtocol.BuildFirstMessageToolNote();
     Check("first-message note is marked for hiding", note.StartsWith(ToolProtocol.FirstNoteMarker));
     Check("first-message note points at discovery", note.Contains(ToolProtocol.ListToolsName));
+    // The note can be the model's ONLY sight of the protocol (fresh chat -> ListTools -> call), so it must
+    // carry the fencing + PAYLOAD rules itself - their absence is what produced the corrupted C# write.
+    Check("first-message note carries the PAYLOAD rule", note.Contains(ToolProtocol.PayloadOpen) && note.Contains(ToolProtocol.PayloadClose));
+    Check("first-message note says to fence the call", note.Contains("```") && note.Contains(ToolProtocol.CallOpen));
+}
+{
+    var idx = ToolProtocol.BuildToolIndex(tools);
+    Check("index lists argument names, * = verbatim, ? = optional", idx.Contains("Sample.WriteFile(path, content*, append?)"), idx);
+    Check("manifest explains the index notation", ToolProtocol.BuildManifest(tools).Contains(ToolProtocol.IndexLegend));
+    var schema = ToolProtocol.SerializeSchemas(new[] { tools[0] });
+    Check("schema flags the verbatim parameter", schema.Contains("\"verbatim\":true") && schema.Contains("VERBATIM"), schema);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -280,7 +395,7 @@ return fail == 0 ? 0 : 1;
 public class Sample
 {
     [AgentTool("Write a text file.")]
-    public string WriteFile(string path, string content, bool append = false) => "";
+    public string WriteFile(string path, [Verbatim] string content, bool append = false) => "";
     [AgentTool("Read a text file.")]
     public string ReadFile(string path, int maxBytes = 65536) => "";
     [AgentTool("Attach labels.")]

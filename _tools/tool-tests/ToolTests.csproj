@@ -14,5 +14,6 @@
     <Compile Include="..\..\Gemineachy\Services\DelegateFormatter.cs" />
     <Compile Include="..\..\Gemineachy\Services\VirtualFilePath.cs" />
     <Compile Include="..\..\Gemineachy\AgentToolAttribute.cs" />
+    <Compile Include="..\..\Gemineachy\VerbatimAttribute.cs" />
   </ItemGroup>
 </Project>

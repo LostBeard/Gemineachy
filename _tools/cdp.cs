@@ -19,6 +19,7 @@ if (args.Length < 2)
     Console.Error.WriteLine("usage: cdp.cs <urlSubstr> <jsOr@file> [timeoutMs]");
     Console.Error.WriteLine("       cdp.cs --grant <origin> <perm[,perm...]>   e.g. --grant https://gemini.google.com audioCapture");
     Console.Error.WriteLine("       cdp.cs --reset-grants <origin>");
+    Console.Error.WriteLine("       cdp.cs --console <urlSubstr> <seconds> [filter]   (all contexts incl. content script; replays buffered)");
     return 1;
 }
 
@@ -60,10 +61,26 @@ if (args[0] is "--grant" or "--reset-grants")
     return 0;
 }
 
+// --console <urlSubstr> <seconds> [filter]: print the target's console output, ALL execution contexts -
+// including the extension's content-script world, whose console a page-world evaluate cannot see.
+// Runtime.enable makes V8 replay the messages it has buffered, so this also shows what was logged BEFORE
+// attaching (e.g. why a tool round silently produced no [TOOL_RESULTS] reply), then listens <seconds> more.
+bool consoleMode = args[0] == "--console";
+if (consoleMode) args = args.Skip(1).ToArray();
+// --shot <urlSubstr> <out.png>: Page.captureScreenshot - LOOK at the page when a probe hangs or a send
+// silently does nothing (a modal, a sign-in wall, or a JS dialog all look identical from evaluate).
+bool shotMode = args[0] == "--shot";
+string? shotOut = null;
+if (shotMode) { shotOut = args[2]; args = new[] { args[1], "1" }; }
+// --enter <urlSubstr>: press Enter as a TRUSTED key (Input.dispatchKeyEvent, isTrusted=true) in whatever has
+// focus. A/B against a script-dispatched Enter/click: a page that ignores untrusted events reacts only to this.
+bool enterMode = args[0] == "--enter";
+if (enterMode) args = new[] { args[1], "1" };
 string sub = args[0];
 // Note: a leading '@' would be swallowed by dotnet's response-file expansion, so use file: instead.
-string js = args[1].StartsWith("file:") ? File.ReadAllText(args[1].Substring(5)) : args[1];
-int timeoutMs = args.Length > 2 ? int.Parse(args[2]) : 60000;
+string js = consoleMode ? "" : args[1].StartsWith("file:") ? File.ReadAllText(args[1].Substring(5)) : args[1];
+int timeoutMs = consoleMode ? int.Parse(args[1]) * 1000 : args.Length > 2 ? int.Parse(args[2]) : 60000;
+string? consoleFilter = consoleMode && args.Length > 2 ? args[2] : null;
 
 using var http = new HttpClient();
 string listJson;
@@ -120,7 +137,66 @@ async Task<JsonDocument> Recv()
     return JsonDocument.Parse(sb.ToString());
 }
 
+if (enterMode)
+{
+    await Send("{\"id\":7,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"rawKeyDown\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"nativeVirtualKeyCode\":13}}");
+    await Send("{\"id\":8,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"char\",\"text\":\"\\r\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"nativeVirtualKeyCode\":13}}");
+    await Send("{\"id\":9,\"method\":\"Input.dispatchKeyEvent\",\"params\":{\"type\":\"keyUp\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"nativeVirtualKeyCode\":13}}");
+    for (int got = 0; got < 3;)
+    {
+        using var msg = await Recv();
+        if (msg.RootElement.TryGetProperty("id", out _)) got++;
+    }
+    Console.WriteLine("enter sent");
+    return 0;
+}
+if (shotMode)
+{
+    await Send("{\"id\":9,\"method\":\"Page.captureScreenshot\",\"params\":{\"format\":\"png\"}}");
+    while (true)
+    {
+        using var msg = await Recv();
+        if (!msg.RootElement.TryGetProperty("id", out var idEl) || idEl.GetInt32() != 9) continue;
+        if (msg.RootElement.TryGetProperty("result", out var res) && res.TryGetProperty("data", out var data))
+        {
+            File.WriteAllBytes(shotOut!, Convert.FromBase64String(data.GetString()!));
+            Console.WriteLine($"saved {shotOut}");
+            return 0;
+        }
+        Console.WriteLine("CDP_ERROR: " + msg.RootElement.ToString());
+        return 5;
+    }
+}
 await Send("{\"id\":1,\"method\":\"Runtime.enable\"}");
+if (consoleMode)
+{
+    var until = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+    try
+    {
+        while (DateTime.UtcNow < until)
+        {
+            using var msg = await Recv();
+            var root = msg.RootElement;
+            if (!root.TryGetProperty("method", out var m)) continue;
+            string? line = null;
+            if (m.GetString() == "Runtime.consoleAPICalled")
+            {
+                var p = root.GetProperty("params");
+                var parts = p.GetProperty("args").EnumerateArray().Select(a =>
+                    a.TryGetProperty("value", out var v) ? v.ToString()
+                    : a.TryGetProperty("description", out var d) ? d.GetString() : a.ToString());
+                line = $"[{p.GetProperty("type").GetString()}] {string.Join(" ", parts)}";
+            }
+            else if (m.GetString() == "Runtime.exceptionThrown")
+                line = "[exception] " + root.GetProperty("params").GetProperty("exceptionDetails").ToString();
+            if (line != null && (consoleFilter == null || line.Contains(consoleFilter, StringComparison.OrdinalIgnoreCase)))
+                Console.WriteLine(line);
+        }
+    }
+    catch (OperationCanceledException) { }
+    try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None); } catch { }
+    return 0;
+}
 // Build the evaluate message with the JS expression JSON-encoded as a string literal.
 // (Hand-encoded to avoid JsonSerializer reflection, which is disabled in `dotnet run file.cs`.)
 static string JsonStr(string s)

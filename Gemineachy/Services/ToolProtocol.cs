@@ -83,6 +83,58 @@ namespace Gemineachy.Services
             @"«PAYLOAD(?::(?<id>[^»\r\n]*))?»(?<body>.*?)«/PAYLOAD(?::[^»\r\n]*)?»",
             RegexOptions.Singleline | RegexOptions.Compiled);
 
+        // Code-region marks. The page scraper wraps the text of every rendered code block in these two
+        // private-use characters, so the protocol knows exactly which parts of a reply came out of a code
+        // block (verbatim) and which came out of rendered markdown prose (lossy: <tags> stripped, backslash
+        // escapes and *emphasis* consumed - undetectably, since what was lost is simply absent). They never
+        // reach a tool: every value is passed through StripCodeMarks first.
+        public const char CodeStart = '';
+        public const char CodeEnd = '';
+
+        /// <summary>Remove the scraper's code-region marks (see <see cref="CodeStart"/>).</summary>
+        public static string StripCodeMarks(string? text) =>
+            string.IsNullOrEmpty(text) || text.IndexOfAny(new[] { CodeStart, CodeEnd }) < 0
+                ? text ?? ""
+                : text.Replace(CodeStart.ToString(), "").Replace(CodeEnd.ToString(), "");
+
+        /// <summary>The marked code regions of a scraped message, as (index of CodeStart, index of CodeEnd).</summary>
+        private static List<(int Start, int End)> CodeRegions(string text)
+        {
+            var regions = new List<(int, int)>();
+            int start = -1;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] == CodeStart) start = i;
+                else if (text[i] == CodeEnd && start >= 0) { regions.Add((start, i)); start = -1; }
+            }
+            return regions;
+        }
+
+        /// <summary>True when every non-whitespace character of [from, to) (code marks aside) lies inside ONE
+        /// code region - i.e. nothing in the span went through markdown prose rendering.</summary>
+        /// <remarks>
+        /// Covers every shape models produce: markers outside the fence (the advertised form), markers inside
+        /// it, and the mixed one Gemini actually wrote 2026-10-12 - one outer fence around the call AND the
+        /// payload's opening marker, an inner ```csharp line left literal, the inner closing ``` closing the
+        /// OUTER block, and the payload's closing marker landing in prose. The code was still exact there.
+        /// </remarks>
+        private static bool IsFenced(string text, List<(int Start, int End)> regions, int from, int to)
+        {
+            int region = -1;
+            bool sawCode = false;
+            for (int i = from; i < to; i++)
+            {
+                var ch = text[i];
+                if (ch == CodeStart) sawCode = true;
+                if (ch == CodeStart || ch == CodeEnd || char.IsWhiteSpace(ch)) continue;
+                int r = regions.FindIndex(g => i > g.Start && i < g.End);
+                if (r < 0) return false;                  // prose
+                if (region >= 0 && r != region) return false; // spans two code blocks
+                region = r;
+            }
+            return region >= 0 || sawCode;   // an EMPTY code block is still a code block (an empty file)
+        }
+
         private static readonly JsonSerializerOptions ArgOptions = new JsonSerializerOptions
         {
             PropertyNameCaseInsensitive = true,
@@ -110,19 +162,36 @@ namespace Gemineachy.Services
             /// every call in that message. Used both for reference-form (an arg value equal to a payload
             /// marker) and name-form (a payload whose id matches a still-unbound parameter name).</summary>
             public IReadOnlyDictionary<string, string>? Payloads { get; set; }
+            /// <summary>True when the call's JSON came out of a code block, so its text is exactly what the
+            /// model wrote. False = it was scraped from rendered markdown prose and may have lost characters.</summary>
+            public bool Fenced { get; set; }
+            /// <summary>Ids of this message's PAYLOAD blocks whose value did NOT come out of a single code
+            /// block (see <see cref="Fenced"/>). A [Verbatim] parameter refuses such a value.</summary>
+            public IReadOnlySet<string>? UnfencedPayloads { get; set; }
         }
 
         /// <summary>Extract every PAYLOAD block from a model message as id -> verbatim body. The body is
         /// used exactly as written (no unescaping), with the wrapping code fence and the single edge
         /// newlines removed. Message-level (payloads are shared across all tool calls in the message).</summary>
-        public static Dictionary<string, string> ExtractPayloads(string? text)
+        public static Dictionary<string, string> ExtractPayloads(string? text) => ExtractPayloads(text, out _);
+
+        /// <summary><see cref="ExtractPayloads(string?)"/>, also reporting which payload ids were NOT a single
+        /// code block - i.e. whose value was scraped from rendered prose and cannot be trusted verbatim.</summary>
+        public static Dictionary<string, string> ExtractPayloads(string? text, out HashSet<string> unfenced)
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            unfenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(text)) return map;
+            var regions = CodeRegions(text);
             foreach (Match m in PayloadBlockRegex.Matches(text))
             {
                 var id = (m.Groups["id"].Success ? m.Groups["id"].Value : "").Trim();
-                map[id] = NormalizePayloadBody(m.Groups["body"].Value); // last block wins on duplicate id
+                var body = m.Groups["body"];
+                // Fenced when the whole block sits inside a code block (markers included), or the body is
+                // exactly one code block (markers outside the fence - the advertised form).
+                var fenced = IsFenced(text, regions, body.Index, body.Index + body.Length);
+                map[id] = NormalizePayloadBody(StripCodeMarks(body.Value)); // last block wins on duplicate id
+                if (fenced) unfenced.Remove(id); else unfenced.Add(id);
             }
             return map;
         }
@@ -138,7 +207,14 @@ namespace Gemineachy.Services
             // newline along with the one the closing marker sits on. \z strips exactly the marker's.
             body = Regex.Replace(body, @"\r?\n[ \t]*\z", "");
             var fence = Regex.Match(body, @"^```[^\n]*\r?\n(?<code>.*?)\r?\n```[ \t]*$", RegexOptions.Singleline);
-            return fence.Success ? fence.Groups["code"].Value : body;
+            if (fence.Success) return fence.Groups["code"].Value;
+            // An opening fence line with NO closing fence: the renderer used the payload's closing ``` to close
+            // an OUTER fence the model had wrapped around the whole call (Gemini, 2026-10-12), so the inner
+            // opening line ("```csharp") survived as literal text inside that outer block. It is syntax, not
+            // file content - drop it. (A value with a real leading fence line arrives balanced, matched above.)
+            var open = Regex.Match(body, @"\A```[\w#+.\-]*[ \t]*\r?\n");
+            if (open.Success && !Regex.IsMatch(body, @"(^|\n)```[ \t]*\r?\n?\z")) return body.Substring(open.Length);
+            return body;
         }
 
         /// <summary>
@@ -161,11 +237,14 @@ namespace Gemineachy.Services
             var calls = new List<ParsedCall>();
             if (string.IsNullOrEmpty(responseText)) return calls;
             // Payloads are message-level: extract once, share with every call in the message.
-            var payloads = ExtractPayloads(responseText);
+            var payloads = ExtractPayloads(responseText, out var unfencedPayloads);
+            var regions = CodeRegions(responseText);
             foreach (Match m in CallRegex.Matches(responseText))
             {
-                var raw = m.Groups["body"].Value.Trim();
-                var call = new ParsedCall { Raw = raw, Payloads = payloads };
+                var body = m.Groups["body"];
+                var fenced = IsFenced(responseText, regions, body.Index, body.Index + body.Length);
+                var raw = StripCodeMarks(body.Value).Trim();
+                var call = new ParsedCall { Raw = raw, Payloads = payloads, Fenced = fenced, UnfencedPayloads = unfencedPayloads };
                 try
                 {
                     using var doc = JsonDocument.Parse(raw);
@@ -211,7 +290,10 @@ namespace Gemineachy.Services
                 {
                     call.ParseError = $"Invalid tool-call JSON: {ex.Message}. If an argument value contains code, quotes, "
                         + $"backslashes, or newlines, do NOT place it in the JSON - send it verbatim as a {PayloadOpen}:argName» … "
-                        + $"{PayloadClose}:argName» code block instead (see the tool manifest).";
+                        + $"{PayloadClose}:argName» code block instead (see the tool manifest)."
+                        + (fenced ? "" : " Also emit the call itself inside a ``` code block: this one was outside one, and the "
+                            + "page's markdown rendering strips backslashes and <...> from text outside code blocks, "
+                            + "which is likely what broke the JSON.");
                 }
                 calls.Add(call);
             }
@@ -254,6 +336,7 @@ namespace Gemineachy.Services
             sb.AppendLine("Simple tools whose arguments are obvious from the summary can be called directly; look up the schema whenever unsure.");
             sb.AppendLine();
             sb.AppendLine("## Available tools");
+            sb.AppendLine(IndexLegend);
             sb.AppendLine(BuildToolIndex(tools));
             return sb.ToString();
         }
@@ -278,7 +361,7 @@ namespace Gemineachy.Services
             sb.AppendLine($"- After emitting tool calls, stop and wait. The extension runs them and replies with a {ResultsMarker} user message containing the results, then you continue.");
             sb.AppendLine();
             sb.AppendLine("## Sending code, file contents, or long/complex text (PAYLOAD blocks)");
-            sb.AppendLine("A JSON string is a poor container for code: escaping every quote, backslash and newline is error-prone and easily corrupted. Instead send such a value as a PAYLOAD block - an ordinary fenced code block (exactly how you would show code to a user) bracketed by plain-text markers. The text between the markers is used VERBATIM as the argument; you escape NOTHING.");
+            sb.AppendLine("A JSON string is a poor container for code: escaping every quote, backslash and newline is error-prone and easily corrupted. Instead send such a value as a PAYLOAD block - an ordinary fenced code block (exactly how you would show code to a user) bracketed by plain-text markers. The text between the markers is used VERBATIM as the argument; you escape NOTHING - write it exactly as the file should read (no \\\" for quotes, no \\$ for dollar signs).");
             sb.AppendLine();
             sb.AppendLine("Preferred form - name the PAYLOAD after the argument, and omit that argument from the JSON:");
             sb.AppendLine();
@@ -299,6 +382,8 @@ namespace Gemineachy.Services
             sb.AppendLine("- The payload name must match the argument name exactly.");
             sb.AppendLine("- When a call needs more than one such argument, add one named PAYLOAD block per argument (each matching its argument's name).");
             sb.AppendLine("- Do NOT put the marker text inside the JSON; the JSON holds only the small/simple arguments, and each PAYLOAD block follows the tool-call block.");
+            sb.AppendLine("- Arguments marked * in the tool index are VERBATIM: they are only accepted from a PAYLOAD block (or a call inside a code block). Text outside code blocks goes through markdown rendering, which silently drops <...>, backslashes and *emphasis*.");
+            sb.AppendLine("- If the value itself contains ``` lines (a Markdown file, for example), open and close its code block with four backticks (````) so the inner fences stay part of the value.");
             sb.AppendLine();
             sb.AppendLine("## Results");
             sb.AppendLine($"Results arrive as a {ResultsMarker} user message with the results JSON inlined in the message body: an array, in call order, of objects shaped {{\"tool\":string,\"ok\":bool,\"result\":any}} on success or {{\"tool\":string,\"ok\":false,\"error\":string}} on failure.");
@@ -318,20 +403,49 @@ namespace Gemineachy.Services
         public static string BuildFirstMessageToolNote() =>
             FirstNoteMarker + "\n"
             + "[Automated note from the Gemineachy browser extension - NOT from the user; do not mention it or reply to it. "
-            + "You have browser-side tools available in this page (for example a virtual filesystem). "
+            + "You have browser-side tools available in this page (for example a virtual filesystem you can read and write files in). "
             + "BEFORE telling the user you cannot do something, check whether a tool exists: call "
-            + $"{ListToolsName} for the full list, or {SearchToolsName} with keywords. To call a tool, emit a fenced code block containing "
-            + $"{CallOpen} {{\"tool\":\"Name\",\"args\":{{...}}}} {CallClose} . If no tool is relevant, just answer the user normally.]";
+            + $"{ListToolsName} for the full list, or {SearchToolsName} with keywords. If no tool is relevant, just answer the user normally.\n"
+            + BuildCallRules() + "]";
 
-        /// <summary>Compact index: one line per tool, "- name : one-line summary". No argument schemas.</summary>
+        /// <summary>Compact index: one line per tool, "- name(args) : one-line summary". The argument NAMES
+        /// are listed (so the model never has to guess one - it once wrote WriteFile's content as "text"),
+        /// but not their types or descriptions; those come from the schema tools.</summary>
         public static string BuildToolIndex(IEnumerable<ToolCall> tools)
         {
             var sb = new StringBuilder();
             foreach (var t in tools)
-                sb.AppendLine($"- {t.ToolName} : {OneLine(t.Description)}");
+                sb.AppendLine($"- {t.ToolName}({ArgumentList(t)}) : {OneLine(t.Description)}");
             var s = sb.ToString().TrimEnd();
             return s.Length == 0 ? "(none)" : s;
         }
+
+        /// <summary>"path, content*, append?" - * = verbatim (send as a PAYLOAD), ? = optional.</summary>
+        public static string ArgumentList(ToolCall tool) =>
+            string.Join(", ", tool.MethodInfo.GetParameters().Select(p =>
+                (p.Name ?? "arg") + (IsVerbatim(p) ? "*" : "") + (p.HasDefaultValue ? "?" : "")));
+
+        /// <summary>How to read the index's argument lists. Shown wherever the index is.</summary>
+        public const string IndexLegend =
+            "Each tool is listed as name(arguments): arg? = optional; arg* = VERBATIM (code, file contents, a regex or other exact text) - send it as a PAYLOAD code block, never inside the JSON.";
+
+        /// <summary>
+        /// The calling rules in their shortest complete form. Carried by every message that can be the model's
+        /// FIRST sight of the tools - the first-message note, ListTools, the schema lookups - because the model
+        /// only follows a protocol it has actually been shown. (The 2026-10-12 C# write corruption: the model
+        /// reached WriteFile through the first-message note + ListTools, never saw the PAYLOAD rule, and wrote
+        /// the code into an unfenced JSON string, where markdown rendering ate <int> and every \".)
+        /// </summary>
+        public static string BuildCallRules() =>
+            "How to call a tool: write a ``` code block containing exactly\n"
+            + $"{CallOpen}\n{{\"tool\":\"Name\",\"args\":{{\"argName\":value}}}}\n{CallClose}\n"
+            + $"then stop; the results come back in a {ResultsMarker} message. "
+            + "Text outside code blocks is rendered as markdown, which silently drops <...>, backslashes and *emphasis* - so the call must be inside the code block.\n"
+            + "An argument marked * must NOT go in the JSON: after the call, write\n"
+            + $"{PayloadOpen}:argName»\n"
+            + "then a ``` code block holding the exact value - written exactly as the file should read, escaping NOTHING (not quotes, not backslashes, not $) - then\n"
+            + $"{PayloadClose}:argName»\n"
+            + "each marker on its own line OUTSIDE the code block. If the value itself contains ``` lines (a Markdown file, for example), open and close its code block with four backticks (````).";
 
         /// <summary>First sentence (or a trimmed prefix) of a description, on a single line.</summary>
         private static string OneLine(string? s, int max = 160)
@@ -371,6 +485,7 @@ namespace Gemineachy.Services
             {
                 sb.AppendLine();
                 sb.AppendLine("Now available (added):");
+                sb.AppendLine(IndexLegend);
                 sb.AppendLine(BuildToolIndex(added));
             }
             if (removed.Count > 0)
@@ -427,6 +542,12 @@ namespace Gemineachy.Services
         {
             var schema = MapType(p.ParameterType);
             var desc = p.GetCustomAttribute<DescriptionAttribute>()?.Description;
+            if (IsVerbatim(p))
+            {
+                schema["verbatim"] = true;
+                desc = (string.IsNullOrEmpty(desc) ? "" : desc + " ")
+                     + $"VERBATIM: send this as a {PayloadOpen}:{p.Name}» code block, never inside the JSON.";
+            }
             if (!string.IsNullOrEmpty(desc)) schema["description"] = desc;
             if (p.HasDefaultValue && p.DefaultValue != null) schema["default"] = p.DefaultValue;
             return schema;
@@ -491,6 +612,18 @@ namespace Gemineachy.Services
         /// the JSON. Explicit args always win over a same-named payload.</summary>
         public static bool TryBindArguments(ParameterInfo[] parameters, JsonElement args, bool hasArgs,
             IReadOnlyDictionary<string, string>? payloads, out object?[] values, out string? error)
+            // A source with no rendering step in between (a test, an API-driven agent) is exact by
+            // construction, so it is treated as fenced. Scraped chat replies go through the ParsedCall overload.
+            => TryBindArguments(parameters, args, hasArgs, payloads, true, null, out values, out error);
+
+        /// <summary>Bind a call scraped from a chat page, enforcing <see cref="VerbatimAttribute"/>: a verbatim
+        /// parameter takes its value only from a code block (a fenced call, or a fenced PAYLOAD).</summary>
+        public static bool TryBindArguments(ParameterInfo[] parameters, ParsedCall call, out object?[] values, out string? error)
+            => TryBindArguments(parameters, call.Args, call.HasArgs, call.Payloads, call.Fenced, call.UnfencedPayloads, out values, out error);
+
+        public static bool TryBindArguments(ParameterInfo[] parameters, JsonElement args, bool hasArgs,
+            IReadOnlyDictionary<string, string>? payloads, bool callFenced, IReadOnlySet<string>? unfencedPayloads,
+            out object?[] values, out string? error)
         {
             values = new object?[parameters.Length];
             error = null;
@@ -498,9 +631,19 @@ namespace Gemineachy.Services
             {
                 var p = parameters[i];
                 var name = p.Name ?? "";
+                var verbatim = IsVerbatim(p);
                 if (hasArgs && args.ValueKind == JsonValueKind.Object
                     && TryGetPropertyIgnoreCase(args, name) is JsonElement el)
                 {
+                    if (verbatim && !callFenced)
+                    {
+                        error = $"Argument '{name}' must arrive exactly, but this tool call was written outside a code block, "
+                              + "where the page's markdown rendering silently strips text such as <...>, backslashes and *emphasis*. "
+                              + $"Resend the call inside a ``` code block, and send '{name}' as a PAYLOAD instead of in the JSON: "
+                              + $"{PayloadOpen}:{name}» on its own line, then a ``` code block holding the exact value, then "
+                              + $"{PayloadClose}:{name}» on its own line.";
+                        return false;
+                    }
                     try
                     {
                         values[i] = el.Deserialize(p.ParameterType, ArgOptions);
@@ -513,6 +656,15 @@ namespace Gemineachy.Services
                 }
                 else if (payloads != null && TryGetPayloadIgnoreCase(payloads, name, out var body))
                 {
+                    if (verbatim && unfencedPayloads != null && unfencedPayloads.Contains(name))
+                    {
+                        error = $"The {PayloadOpen}:{name}» block's value was not a single ``` code block, so it went through the "
+                              + "page's markdown rendering, which silently strips text such as <...>, backslashes and *emphasis*. "
+                              + $"Resend it with the exact value inside ONE ``` code block between {PayloadOpen}:{name}» and "
+                              + $"{PayloadClose}:{name}». If the value itself contains ``` lines, open and close its code block "
+                              + "with four backticks (````) instead.";
+                        return false;
+                    }
                     try
                     {
                         // A payload is a raw string: assign directly to a string parameter; for any other
@@ -537,6 +689,9 @@ namespace Gemineachy.Services
             }
             return true;
         }
+
+        /// <summary>True for a parameter marked <see cref="VerbatimAttribute"/>.</summary>
+        public static bool IsVerbatim(ParameterInfo p) => p.GetCustomAttribute<VerbatimAttribute>() != null;
 
         private static bool TryGetPayloadIgnoreCase(IReadOnlyDictionary<string, string> payloads, string name, out string body)
         {

@@ -342,7 +342,7 @@ namespace Gemineachy.Services
             var matches = ToolProtocol.MatchTools(Tools.Values, query);
             if (matches.Count == 0)
                 return $"No tools match '{query}'. Call {ToolProtocol.ListToolsName} to see everything available.";
-            return ToolProtocol.SerializeSchemas(matches);
+            return ToolProtocol.SerializeSchemas(matches) + "\n\n" + ToolProtocol.BuildCallRules();
         }
         [AgentTool("Returns the full argument schema for a tool by exact name, or several names comma-separated (in either 'name' or 'names'). Call this before using a tool whose arguments you are unsure of.")]
         string GetToolSchema(string name = "", string names = "")
@@ -353,10 +353,10 @@ namespace Gemineachy.Services
             var matches = Tools.Values.Where(t => wanted.Contains(t.ToolName)).ToList();
             if (matches.Count == 0)
                 return $"No tool named '{name}'. Call {ToolProtocol.ListToolsName} or {ToolProtocol.SearchToolsName} (keywords) to find it.";
-            return ToolProtocol.SerializeSchemas(matches);
+            return ToolProtocol.SerializeSchemas(matches) + "\n\n" + ToolProtocol.BuildCallRules();
         }
         [AgentTool("Returns the current tool index: every available tool's name and a one-line summary (no argument schemas). Use SearchTools or GetToolSchema for a tool's arguments.")]
-        string ListTools() => ToolProtocol.BuildToolIndex(Tools.Values);
+        string ListTools() => $"{ToolProtocol.IndexLegend}\n{ToolProtocol.BuildToolIndex(Tools.Values)}\n\n{ToolProtocol.BuildCallRules()}";
 
         public bool UnregisterTool(string toolName)
         {
@@ -581,7 +581,18 @@ namespace Gemineachy.Services
             UpdateFromChat();
             OnDOMMutation?.Invoke();
         }
-        private bool IsProcessing() => StopButtonVisible() || (!SendButtonVisible() && !DictateButtonVisible());
+        // A response is still streaming while anything inside it is aria-busy="true". The Stop button alone
+        // is NOT enough - sampled 2026-10-12: Stop disappeared at 5.5 s while the response was still
+        // aria-busy and streaming until 7.7 s, so the turn was read early (68 chars of a WriteFile call),
+        // parsed as zero calls, and the model's correct tool call was silently never executed.
+        const string ResponseBusySelector = "chat-window model-response [aria-busy=\"true\"]";
+        private bool IsProcessing() => StopButtonVisible() || ResponseBusy() || (!SendButtonVisible() && !DictateButtonVisible());
+        private bool ResponseBusy()
+        {
+            if (_document == null) return false;
+            using var busy = _document.QuerySelector(ResponseBusySelector);
+            return busy != null;
+        }
         private bool StopButtonVisible()
         {
             if (_document == null) return false;
@@ -653,11 +664,14 @@ namespace Gemineachy.Services
                             // tool-call parse and stalled the game while tool calls were hidden. Our
                             // delimiter-based parser («TOOL_CALL … ») does not need innerText's newlines.
                             using var contentNode = node.QuerySelector<HTMLElement>("model-response [id*='model-response-message-content']");
-                            var modelResponse = ReadMessageText(contentNode);
+                            // Marked = code blocks wrapped in ToolProtocol's code-region marks, for the tool
+                            // parser (it must know what was fenced); everyone else gets the plain text.
+                            var markedResponse = ReadMessageText(contentNode);
+                            var modelResponse = ToolProtocol.StripCodeMarks(markedResponse);
                             // (Hiding of tool-call responses happens in EarlyHideToolTraffic on every
                             // mutation, so the block is hidden while streaming - not only once complete.)
                             // handle tool calling
-                            _ = HandleAgentMessage(modelResponse);
+                            _ = HandleAgentMessage(markedResponse);
                             //
                             queryTCS.TrySetResult(modelResponse);
                             OnQueryResponse?.Invoke(query, modelResponse);
@@ -704,9 +718,11 @@ namespace Gemineachy.Services
                 using (pre)
                 {
                     var code = pre.TextContent ?? "";
-                    // Replace the whole <code-block> when there is one; a bare <pre> is its own block.
+                    // Replace the whole <code-block> when there is one; a bare <pre> is its own block. The
+                    // code-region marks tell ToolProtocol this text is VERBATIM (it came out of a code block,
+                    // not out of lossy markdown prose); callers that want plain text strip them.
                     using var block = pre.Closest<HTMLElement>("code-block");
-                    (block ?? pre).TextContent = "\n" + code + "\n";
+                    (block ?? pre).TextContent = "\n" + ToolProtocol.CodeStart + code + ToolProtocol.CodeEnd + "\n";
                 }
             }
             return clone.TextContent?.Trim() ?? "";
@@ -729,9 +745,13 @@ namespace Gemineachy.Services
             {
                 const string code = "using System;\nConsole.WriteLine(\"Hello, \\\"World\\\"!\");\n";
                 using var host = BuildCodeBlockReplica(code);
-                var payloads = ToolProtocol.ExtractPayloads(ReadMessageText(host));
+                var payloads = ToolProtocol.ExtractPayloads(ReadMessageText(host), out var unfenced);
                 var got = payloads.TryGetValue("content", out var v) ? v : null;
-                verdict = got == code ? "PASS" : $"FAIL got={Escape(got)} want={Escape(code)}";
+                verdict = got != code ? $"FAIL got={Escape(got)} want={Escape(code)}"
+                        // the replica IS a code block, so the payload must be recognised as fenced -
+                        // otherwise every real [Verbatim] write would be refused
+                        : unfenced.Contains("content") ? "FAIL code-block payload not recognised as fenced"
+                        : "PASS";
             }
             catch (Exception ex) { verdict = $"THREW {ex.GetType().Name}: {ex.Message}"; }
             if (verdict != "PASS") Console.WriteLine($"[SCRAPETEST] {verdict}");
@@ -807,6 +827,10 @@ namespace Gemineachy.Services
             try
             {
                 var calls = ToolProtocol.ParseCalls(modelResponse);
+                // One line per completed turn: the evidence for "the model called a tool and nothing came
+                // back" - was the turn read at all, how long was it, and did the call parse?
+                Console.WriteLine($"[Gemineachy] turn complete: {modelResponse.Length} chars, {calls.Count} call(s)"
+                    + string.Concat(calls.Where(c => c.ParseError != null).Select(c => $" | parse error: {Trunc(c.ParseError!, 160)}")));
                 if (calls.Count == 0) return;
 
                 if (_toolRounds >= MaxToolRounds)
@@ -838,7 +862,9 @@ namespace Gemineachy.Services
                 _lastRoundSig = sig;
                 _lastRoundFailed = anyFailed;
                 var json = ToolProtocol.SerializeResults(results);
+                Console.WriteLine($"[Gemineachy] sending results for {results.Count} call(s), {results.Count(r => !r.Ok)} failed");
                 await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json);
+                Console.WriteLine("[Gemineachy] results delivered");
             }
             catch (Exception ex)
             {
@@ -870,7 +896,7 @@ namespace Gemineachy.Services
             {
                 var method = tool.MethodInfo;
                 var parameters = method.GetParameters();
-                if (!ToolProtocol.TryBindArguments(parameters, call.Args, call.HasArgs, call.Payloads, out var argValues, out var bindError))
+                if (!ToolProtocol.TryBindArguments(parameters, call, out var argValues, out var bindError))
                     return new ToolResult { Tool = call.Tool, Ok = false, Error = bindError };
                 var result = await InvokeMaybeAsync(tool, argValues, method.ReturnType);
                 Console.WriteLine($"Tool '{call.Tool}' invoked.");
@@ -1050,9 +1076,10 @@ namespace Gemineachy.Services
 
         /// <summary>Max times to (re)click Send when Gemini doesn't accept a message (e.g. transient errors).</summary>
         public int MaxSendAttempts { get; set; } = 3;
-        /// <summary>How long to wait for the compose box to clear (= send accepted) before treating a send as
-        /// failed and retrying. Kept short so a silently-dropped click retries quickly instead of stalling.</summary>
-        public double SendAcceptTimeoutMs { get; set; } = 4000;
+        /// <summary>How long to wait for an acceptance signal (see <see cref="WaitForSendAcceptedAsync"/>) before
+        /// treating a send as failed and retrying. Long enough for a slow-accepting page; a silently-dropped
+        /// click still retries, and a late acceptance is re-checked before any retry.</summary>
+        public double SendAcceptTimeoutMs { get; set; } = 10000;
 
         /// <summary>
         /// Send the message and await Gemini's response, verifying the send was ACCEPTED (Gemini clears
@@ -1074,8 +1101,9 @@ namespace Gemineachy.Services
                     OnQuery += onQuery;
                     try
                     {
+                        var turnsBefore = TurnCount();
                         await PrepareAndSendAsync(text, files, ct);
-                        if (await WaitForSendAcceptedAsync(ct))
+                        if (await WaitForSendAcceptedAsync(turnsBefore, ct) || SendTookEffect(turnsBefore))
                         {
                             // Accepted (compose box cleared). Await the model response.
                             var response = await tcs.Task.WaitAsync(ct);
@@ -1134,6 +1162,14 @@ namespace Gemineachy.Services
                     Data = text
                 });
                 inputElement.DispatchEvent(inputEvent);
+                // Let the editor PROCESS the change before Send is clicked: cross a task boundary. Gemini's
+                // Quill editor syncs its model from the DOM after the current task, and its Send handler sends
+                // the MODEL. A/B measured 2026-10-12: textContent + click in the same task was never accepted
+                // (0/2, and no Send button existed yet on an empty box); a setTimeout(0)/200 ms yield first was
+                // accepted in 51-74 ms (3/3). The same-task click was the "send attempt 1/3 NOT accepted" on
+                // every first message: the user's own text had already put a Send button in place, so the wait
+                // below returned at once and clicked before the editor had taken our text.
+                await Task.Delay(1, ct);
             }
 
             // (Re)attach only when NOTHING is attached: initial send, or a retry after a failed send
@@ -1155,8 +1191,18 @@ namespace Gemineachy.Services
             sendButton?.Click();
         }
 
-        /// <summary>Send is accepted when Gemini clears the compose box; times out (=> failed) otherwise.</summary>
-        private async Task<bool> WaitForSendAcceptedAsync(CancellationToken ct)
+        /// <summary>
+        /// A send is accepted when ANY of Gemini's acceptance signals shows: the compose box clears, the Stop
+        /// button appears (the request is in flight), or a new turn renders. Times out (=> failed) otherwise.
+        /// </summary>
+        /// <remarks>
+        /// Measured 2026-10-12: normally the compose box clears and Stop appears together ~270 ms after the
+        /// click. But during a slow window (observed for ~30 min, signed out) the page sat with the compose box
+        /// still full for 6 s+ and the request was nevertheless in flight - Stop showing, the turn rendering
+        /// later. Judging by the compose box alone called that a failure, and the retry then re-typed and
+        /// re-sent into a chat that was already generating (a duplicate message, or a click on Stop).
+        /// </remarks>
+        private async Task<bool> WaitForSendAcceptedAsync(int turnsBefore, CancellationToken ct)
         {
             using var acceptCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             acceptCts.CancelAfter(TimeSpan.FromMilliseconds(SendAcceptTimeoutMs));
@@ -1165,7 +1211,7 @@ namespace Gemineachy.Services
                 await QuerySelectorAsync(d =>
                 {
                     using var input = d.QuerySelector<HTMLDivElement>(TextInputSelector);
-                    return string.IsNullOrEmpty(input?.TextContent);
+                    return string.IsNullOrEmpty(input?.TextContent) || SendTookEffect(turnsBefore);
                 }, acceptCts.Token);
                 return true;
             }
@@ -1174,6 +1220,13 @@ namespace Gemineachy.Services
                 return false; // accept timeout -> failed send, caller retries
             }
         }
+
+        /// <summary>The send is in flight or done even if the compose box has not cleared yet. Checked again
+        /// right before any retry, so a LATE acceptance is never answered with a second send.</summary>
+        private bool SendTookEffect(int turnsBefore) => StopButtonVisible() || TurnCount() > turnsBefore;
+
+        private int TurnCount() =>
+            _document?.QuerySelectorAll<HTMLDivElement>("chat-window infinite-scroller > div.conversation-container").Using(o => o.Length) ?? 0;
 
         private int CurrentAttachmentCount() =>
             _document?.QuerySelectorAll<HTMLDivElement>(FileAttachmentsSelector).Using(o => o.Length) ?? 0;

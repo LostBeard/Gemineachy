@@ -1,0 +1,1 @@
+Write a small C# console script that keeps a Dictionary<string, List<int>> of student scores, prints each student's average formatted to 2 decimals, and prints the top student. Save it to {PATH} using your file tools.

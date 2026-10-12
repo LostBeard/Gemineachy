@@ -289,7 +289,7 @@ namespace Gemineachy.Services
         }
 
         [AgentTool("Write text to a file in the virtual filesystem (creates it and any parent folders). By default it overwrites; pass append=true to add to the end. The target mount must have write access granted by the user.")]
-        async Task<string> WriteFile(string path, string content, bool append = false)
+        async Task<string> WriteFile(string path, [Verbatim] string content, bool append = false)
         {
             LogAccess(append ? "append" : "write", path);
             if (!VirtualFilePath.TryNormalize(path, out var segs, out var err)) return err!;
@@ -394,7 +394,7 @@ namespace Gemineachy.Services
         // ---- QoL search / replace tools (matching runs JS-side; bulk content never enters .NET) -------
 
         [AgentTool("Search file CONTENTS by regular expression (like grep). Searches text files under `path` recursively, optionally limited to files whose name matches `filePattern` (a glob like \"*.md\"). Returns each matching file with its matching lines. The regex runs in JavaScript on the file text held browser-side - file contents are never copied into .NET.")]
-        async Task<string> SearchContent(string path, string pattern, string filePattern = "", bool caseInsensitive = false, int maxResults = 200)
+        async Task<string> SearchContent(string path, [Verbatim] string pattern, string filePattern = "", bool caseInsensitive = false, int maxResults = 200)
         {
             if (string.IsNullOrWhiteSpace(pattern)) return "Provide a regex pattern to search for.";
             if (!VirtualFilePath.TryNormalize(path, out var segs, out var err)) return err!;
@@ -473,7 +473,7 @@ namespace Gemineachy.Services
         }
 
         [AgentTool("Search-and-replace by regular expression across files under `path` recursively, optionally limited to `filePattern` (glob). `replacement` may use $1, $2 for capture groups. Runs as a DRY RUN by default, reporting how many replacements each file would get; pass dryRun=false to actually write (the mount must have write access). Matching and replacement happen in JavaScript - file contents never enter .NET.")]
-        async Task<string> ReplaceInFiles(string path, string pattern, string replacement, string filePattern = "", bool caseInsensitive = false, bool dryRun = true)
+        async Task<string> ReplaceInFiles(string path, [Verbatim] string pattern, [Verbatim] string replacement, string filePattern = "", bool caseInsensitive = false, bool dryRun = true)
         {
             if (string.IsNullOrWhiteSpace(pattern)) return "Provide a regex pattern.";
             if (!VirtualFilePath.TryNormalize(path, out var segs, out var err)) return err!;
@@ -529,7 +529,7 @@ namespace Gemineachy.Services
         }
 
         [AgentTool("Make a precise edit to ONE text file: replace an EXACT literal substring `oldText` with `newText`. By default `oldText` must occur EXACTLY ONCE (it fails otherwise, so you never edit the wrong place - include enough surrounding context to make it unique); pass replaceAll=true to replace every occurrence. `oldText` is matched literally (NOT a regex) - prefer this over ReplaceInFiles for a single targeted change. The mount must have write access.")]
-        async Task<string> EditFile(string path, string oldText, string newText, bool replaceAll = false)
+        async Task<string> EditFile(string path, [Verbatim] string oldText, [Verbatim] string newText, bool replaceAll = false)
         {
             LogAccess("edit", path);
             if (string.IsNullOrEmpty(oldText)) return "Provide the exact existing text to replace (oldText).";
