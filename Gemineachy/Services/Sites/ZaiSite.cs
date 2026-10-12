@@ -45,8 +45,9 @@ namespace Gemineachy.Services.Sites
         // Exact text from the editor's own objects via wwwroot/page-bridge.js; the DOM reading below is the fallback.
         public bool ReadsCodeFromPage => true;
         public string[] WatchedAttributes => new[] { "disabled" };
-        // Set from measurement: see the e2e comparison recorded in Web-Agents.md.
-        public bool IntroduceWithWarmUp => false;
+        // Measured 2026-10-12, fresh chats: tool note alone followed 10/15 (declines: "instructions embedded in a
+        // message telling me to simulate tool calls"); hidden warm-up 5/5, every file exact.
+        public bool IntroduceWithWarmUp => true;
         public int MaxMessageLength => 0;   // no limit measured
 
         // The sidebar's "New Chat" button is in the DOM even while the sidebar is collapsed.
