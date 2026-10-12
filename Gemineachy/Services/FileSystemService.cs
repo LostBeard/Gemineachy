@@ -115,7 +115,7 @@ namespace Gemineachy.Services
             var mount = new FsMount { Name = name, Kind = "opfs", Handle = root, Permission = "rw" };
             _mounts.Add(mount);
             NotifyChanged();
-            await NotifyGeminiMountAdded(mount);
+            _ = NotifyGeminiMountAdded(mount);   // not awaited: see NotifyGeminiMountAdded
             return $"Mounted OPFS at /{name}.";
         }
 
@@ -145,7 +145,7 @@ namespace Gemineachy.Services
             var mount = new FsMount { Name = name, Kind = "folder", Handle = handle, Permission = await handle.GetReadWritePermissions() };
             _mounts.Add(mount);
             NotifyChanged();
-            await NotifyGeminiMountAdded(mount);
+            _ = NotifyGeminiMountAdded(mount);   // not awaited: see NotifyGeminiMountAdded
             return $"Mounted folder '{handle.Name}' at /{name}.";
         }
 
@@ -158,7 +158,7 @@ namespace Gemineachy.Services
             if (mount.Kind != "opfs") mount.Handle?.Dispose();
             try { await DeletePersistedAsync(name); } catch { }
             NotifyChanged();
-            await NotifyGeminiMountRemoved(name);
+            _ = NotifyGeminiMountRemoved(name);
         }
 
         /// <summary>Turn persistence on/off for a mount (saves/removes the handle in IndexedDB).</summary>
@@ -886,6 +886,10 @@ namespace Gemineachy.Services
 
         private void NotifyChanged() => OnChanged?.Invoke();
 
+        /// <summary>Tell the chat model about a new mount. Callers do NOT await it: it waits for the model's reply,
+        /// which takes a minute or more on a thinking model (Z.ai, 2026-10-12), and the Files app ignores every
+        /// button while an action is in flight - "persist" right after "+ Add OPFS" silently did nothing.
+        /// Never throws.</summary>
         private async Task NotifyGeminiMountAdded(FsMount mount)
         {
             try

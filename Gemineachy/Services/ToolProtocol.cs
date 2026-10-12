@@ -269,6 +269,7 @@ namespace Gemineachy.Services
         {
             var calls = new List<ParsedCall>();
             if (string.IsNullOrEmpty(responseText)) return calls;
+            responseText = RecoverLabelledCalls(responseText);
             // Payloads are message-level: extract once, share with every call in the message.
             var payloads = ExtractPayloads(responseText, out var unfencedPayloads);
             var incompletePayload = IncompletePayloadId(responseText);
@@ -336,6 +337,30 @@ namespace Gemineachy.Services
                 calls.Add(call);
             }
             return calls;
+        }
+
+        private static readonly Regex LabelledCallBody = new Regex(
+            @"\A\s*\{.*""tool"".*\}\s*" + Regex.Escape(CallClose) + @"\s*\z", RegexOptions.Singleline | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Restore the opening marker of a call whose model wrote it as the code fence's LANGUAGE
+        /// (<c>```«TOOL_CALL</c>): the page renders the info string as the block's label, which the scraper drops
+        /// as chrome, so the block reads <c>{"tool":…}»</c> with no opening marker. A code block holding exactly a
+        /// JSON object with a "tool" key followed by the closing marker is unambiguous. Measured: Z.ai's GLM,
+        /// 2026-10-12 (1 of 4 fresh chats).
+        /// </summary>
+        private static string RecoverLabelledCalls(string text)
+        {
+            if (text.IndexOf(CodeStart) < 0) return text;
+            var regions = CodeRegions(text);
+            for (int r = regions.Count - 1; r >= 0; r--)
+            {
+                var (start, end) = regions[r];
+                var body = text.Substring(start + 1, end - start - 1);
+                if (body.Contains(CallOpen, StringComparison.Ordinal) || !LabelledCallBody.IsMatch(body)) continue;
+                text = text.Insert(start + 1, CallOpen + "\n");
+            }
+            return text;
         }
 
         /// <summary>Case-insensitive top-level property lookup (JsonElement.TryGetProperty is ordinal).</summary>

@@ -165,6 +165,14 @@ var wfParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters
     Check("code marks never reach Raw", !c.Raw.Contains(ToolProtocol.CodeStart) && !c.Raw.Contains(ToolProtocol.CodeEnd), c.Raw);
 }
 {
+    // ```«TOOL_CALL - the marker became the fence's language label, which the scraper drops as chrome (Z.ai GLM).
+    var calls = ToolProtocol.ParseCalls("\n" + Code("{\"tool\":\"ChatAgentService.ListTools\",\"args\":{}}\n»") + "\n");
+    Check("call whose open marker was the fence label is recovered", calls.Count == 1 && calls[0].ParseError == null
+        && calls[0].Tool == "ChatAgentService.ListTools" && calls[0].Fenced, calls.Count > 0 ? calls[0].ParseError : "no call");
+    // A code block that merely SHOWS JSON (no closing marker) is not a call.
+    Check("plain JSON code block is not a call", ToolProtocol.ParseCalls(Code("{\"tool\":\"X\",\"args\":{}}")).Count == 0);
+}
+{
     // A virtualizing editor (Qwen's Monaco, a visible Z.ai CodeMirror) rendered only part of the payload's
     // code block: the scraper marks the region CodeIncomplete, and the call must be refused, never run.
     var msg = Code("«TOOL_CALL\n{\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}}\n»")
