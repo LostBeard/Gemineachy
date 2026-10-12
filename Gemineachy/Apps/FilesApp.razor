@@ -3,6 +3,7 @@
 @attribute [App(Name = "Files", Icon = "🗂", Pinned = true, SingleInstance = true, Description = "Mount folders the agent can read and write")]
 @inherits AppBase
 @inject FileSystemService Fs
+@inject FsSelfTest FsTest
 
 <div class="files-app">
     <div class="files-section">
@@ -45,6 +46,7 @@
         <div class="files-actions">
             <button class="files-btn add" @onclick="AddOpfs" disabled="@_busy">+ Add OPFS</button>
             <button class="files-btn add" @onclick="MountFolder" disabled="@_busy">+ Mount folder…</button>
+            <button class="files-btn" title="Run every file tool end-to-end against a scratch OPFS folder (sends nothing to the chat)" @onclick="RunSelfTest" disabled="@_busy">🧪 Test tools</button>
         </div>
     </div>
 
@@ -117,6 +119,11 @@
             _status = await Fs.MountFolderAsync(_mountName);
             _mountName = "";
         });
+    }
+
+    private async Task RunSelfTest()
+    {
+        await Run(async () => { _status = "Testing every file tool…"; StateHasChanged(); _status = await FsTest.RunAsync(); });
     }
 
     private async Task Grant(string name)

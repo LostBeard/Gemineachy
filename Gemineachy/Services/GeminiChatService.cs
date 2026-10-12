@@ -872,6 +872,19 @@ namespace Gemineachy.Services
             }
         }
 
+        /// <summary>
+        /// Run a model message through the REAL tool pipeline - <see cref="ToolProtocol.ParseCalls"/>, the
+        /// fenced/[Verbatim] bind, and invocation - WITHOUT sending anything to the chat. The message may carry
+        /// the scraper's code-region marks, exactly as <c>ReadMessageText</c> produces them. For self-tests.
+        /// </summary>
+        public async Task<List<ToolResult>> RunToolMessageAsync(string markedMessage)
+        {
+            var results = new List<ToolResult>();
+            foreach (var call in ToolProtocol.ParseCalls(markedMessage))
+                results.Add(await InvokeToolCallAsync(call));
+            return results;
+        }
+
         /// <summary>One tool invocation's outcome, serialized back to Gemini as
         /// {tool, ok, result?} on success or {tool, ok:false, error} on failure. A concrete type (not
         /// an anonymous object) so the ok flag can be read directly and it survives trimming.</summary>

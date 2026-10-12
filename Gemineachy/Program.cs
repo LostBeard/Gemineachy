@@ -50,6 +50,8 @@ else
     builder.Services.AddSingleton<GeminiChatService>();
     // Filesystem service: registers its always-available tools at startup and restores persisted mounts.
     builder.Services.AddSingleton<FileSystemService>();
+    // On-demand end-to-end test of every filesystem tool (Files app "🧪 Test tools").
+    builder.Services.AddSingleton<FsSelfTest>();
     // Phase-1 Reachy relay proof (writes data-reachy-probe to the DOM); flip its RunProbe const off later.
     builder.Services.AddSingleton<ReachyRelayProbe>();
     // Reachy robots: registers its always-available tools at startup and restores persisted robots.
