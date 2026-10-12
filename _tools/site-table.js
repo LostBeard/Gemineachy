@@ -33,12 +33,13 @@ window.__gemSite = (() => {
       // Signed out, the "New chat" link opens a login modal; a page load is the only way to a fresh chat.
       newChat: () => { location.href = 'https://chatgpt.com/'; },
     },
-    'chat.qwen.ai': {   // user and assistant live in SIBLING .qwen-chat-message-select-turn blocks
+    'chat.qwen.ai': {   // guest mode at the site root (reloading /c/guest lands on the login page)
       user: '.qwen-chat-message-user', reply: '.qwen-chat-message-assistant',
       compose: 'textarea.message-input-textarea', send: 'button[aria-label="Send"]',
       busy: () => !!q('button[aria-label="Stop"]'),
       userText: u => ((u.querySelector('p.user-message-content') || u).textContent || '').trim(),
-      replyOf: u => u.closest('.qwen-chat-message-select-turn')?.nextElementSibling?.querySelector('.qwen-chat-message-assistant') || null,
+      // wrappers vary (one turn block holding both, or separate blocks): pair by document order
+      replyOf: u => { const ms = [...document.querySelectorAll('.qwen-chat-message-user, .qwen-chat-message-assistant')]; const n = ms[ms.indexOf(u) + 1]; return n && n.classList.contains('qwen-chat-message-assistant') ? n : null; },
       body: r => r.querySelector('.response-message-content') || r,
       newChat: () => { location.href = 'https://chat.qwen.ai/'; },
     },

@@ -1,5 +1,5 @@
 // Completion study for any site in site-table.js (prepend it: file:site-table.js+site-busy.js). Sends
-// window.__siteMsg (or a short default) and SAMPLES candidate busy/done signals every 200 ms until 10 s after the
+// window.__siteMsg (or a short default) and SAMPLES candidate busy/done signals every 200 ms until 30 s (window.__quietMs) after the
 // last change: Send present/disabled, any visible Stop button, the last reply's footer button labels and classes.
 (async () => {
   const S = window.__gemSite; if (!S) return 'no site-table entry for ' + location.host;
@@ -27,7 +27,7 @@
     const s = sample();
     const key = s.replace(/"textLen":-?\d+/, '');   // text grows every frame while streaming: log it only alongside a real change
     if (key !== prev) { log.push(`${ms()} ${s}`); prev = key; lastChange = performance.now(); }
-    else if (performance.now() - lastChange > 10000) break;
+    else if (performance.now() - lastChange > (window.__quietMs || 30000)) break;
   }
   return log.join('\n');
 })()

@@ -688,6 +688,10 @@ namespace Gemineachy.Services
             HTMLElement? user = null;
             for (int i = 0; i < fresh.Length; i++)
             {
+                // A message whose text has not rendered yet stays UNMARKED, so a later mutation looks again. Qwen
+                // renders the bubble first and fades its text in; marking it at first sight dropped the turn
+                // (StartTurn ignores an empty query) and its tool call never ran (2026-10-12).
+                if (!ignoreExisting && string.IsNullOrEmpty(Site.ReadUserText(fresh[i]))) { fresh[i].Dispose(); continue; }
                 fresh[i].SetAttribute(SeenAttr, "");
                 if (i == fresh.Length - 1 && !ignoreExisting) user = fresh[i];
                 else fresh[i].Dispose();

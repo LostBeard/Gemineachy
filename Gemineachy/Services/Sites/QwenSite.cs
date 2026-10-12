@@ -10,8 +10,8 @@ namespace Gemineachy.Services.Sites
     /// <list type="bullet">
     /// <item>Compose: <c>textarea.message-input-textarea</c>, React-controlled. Send: <c>button[aria-label="Send"]</c>
     /// (disabled while the box is empty). While a reply streams, Send is replaced by <c>button[aria-label="Stop"]</c>.</item>
-    /// <item>Turns: <c>.qwen-chat-message-select-turn</c> siblings; the user's and the assistant's are SEPARATE
-    /// turn blocks, the reply's following the user's. User text: <c>p.user-message-content</c>, one text node,
+    /// <item>Turns: the user message and its reply have appeared both inside ONE turn wrapper and in separate ones,
+    /// so a reply is paired by document order (see <see cref="FindReply"/>). User text: <c>p.user-message-content</c>, one text node,
     /// white-space: pre-wrap. Reply: <c>.qwen-chat-message-assistant</c>; its "Thinking completed" card sits
     /// OUTSIDE the answer body <c>.response-message-content</c>, and its footer gains a Regenerate button when done.</item>
     /// <item>Code: <c>pre.qwen-markdown-code</c> holds a header (language label + icon buttons) and a Monaco editor.
@@ -66,11 +66,21 @@ namespace Gemineachy.Services.Sites
             return ((p ?? userMessage).TextContent ?? "").Trim();
         }
 
+        /// <summary>The next message after <paramref name="userMessage"/> in document order, when it is a reply. The
+        /// wrappers vary: a fresh guest chat put the user message and its reply in ONE
+        /// <c>.qwen-chat-message-select-turn-message</c>, an earlier page in SEPARATE turn blocks - order is stable.</summary>
         public HTMLElement? FindReply(HTMLElement userMessage)
         {
-            using var turn = userMessage.Closest<HTMLElement>(".qwen-chat-message-select-turn");
-            using var next = turn?.NextElementSibling;
-            return next?.QuerySelector<HTMLElement>(ReplySelector);
+            using var doc = _js.GetDocument();
+            if (doc == null) return null;
+            var messages = doc.QuerySelectorAll<HTMLElement>($"{UserMessageSelector}, {ReplySelector}").Using(o => o.ToArray());
+            try
+            {
+                int i = System.Array.FindIndex(messages, m => m.IsSameNode(userMessage));
+                if (i < 0 || i + 1 >= messages.Length || !messages[i + 1].ClassList.Contains("qwen-chat-message-assistant")) return null;
+                return messages[i + 1].JSRefCopy<HTMLElement>();
+            }
+            finally { foreach (var m in messages) m.Dispose(); }
         }
 
         public HTMLElement? ReplyContent(HTMLElement reply) =>

@@ -46,12 +46,15 @@ namespace Gemineachy.Services.Sites
         public bool ReadsCodeFromPage => true;
         public string[] WatchedAttributes => new[] { "disabled" };
         // Measured 2026-10-12, fresh chats: tool note alone followed 10/15 (declines: "instructions embedded in a
-        // message telling me to simulate tool calls"); hidden warm-up 5/5, every file exact.
+        // message telling me to simulate tool calls"); hidden warm-up 6/7, every file exact.
         public bool IntroduceWithWarmUp => true;
         public int MaxMessageLength => 0;   // no limit measured
 
-        // The sidebar's "New Chat" button is in the DOM even while the sidebar is collapsed.
-        public bool StartNewChat(Document document) => SiteDom.Click(document, "button#new-chat-button");
+        // Signed out there is no in-page fresh chat (measured 2026-10-12): the collapsed sidebar's
+        // button#new-chat-button does nothing, and the rail's button#sidebar-new-chat-button opens a "Clear Current
+        // Chat? ... Sign in" modal. Only a page load gives a fresh chat, which would restart the extension mid-send.
+        // So a declined warm-up falls back to the tool note, as on ChatGPT.
+        public bool StartNewChat(Document document) => false;
 
         public string ReadCompose(HTMLElement compose) => SiteDom.TextAreaValue(compose);
         public void WriteCompose(HTMLElement compose, string text) => SiteDom.SetTextAreaValue(_js, compose, text);
