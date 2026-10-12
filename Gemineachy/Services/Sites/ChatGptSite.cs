@@ -38,6 +38,7 @@ namespace Gemineachy.Services.Sites
         public string[] WatchedAttributes => new[] { "data-message-complete", "data-message-streaming", "aria-label", "disabled" };
         // Set from measurement: see the e2e comparison recorded in Web-Agents.md.
         public bool IntroduceWithWarmUp => true;
+        public int MaxMessageLength => 0;   // no limit measured
 
         const string StopButtonSelector = "button[aria-label=\"Stop generating\"]";
 

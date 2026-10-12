@@ -20,7 +20,7 @@ namespace Gemineachy.Services
     public class ChatAgentService(SpawnJSRuntime JS, SpawnDomRenderer Renderer) : IAsyncBackgroundService
     {
         /// <summary>Adapters for every supported chat site. The page's host picks one at startup.</summary>
-        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS), new ChatGptSite(JS) };
+        private IChatSite[] CreateSites() => new IChatSite[] { new GeminiSite(), new DuckAiSite(JS), new ChatGptSite(JS), new GoogleAiModeSite(JS) };
         /// <summary>The chat site this page is, or null on a page Gemineachy has no adapter for.</summary>
         public IChatSite? Site { get; private set; }
         /// <summary>Display name of the chat agent on this page ("Gemini", "Duck.ai"), or "the chat agent".</summary>
@@ -941,7 +941,7 @@ namespace Gemineachy.Services
                 }
                 _lastRoundSig = sig;
                 _lastRoundFailed = anyFailed;
-                var json = ToolProtocol.SerializeResults(results);
+                var json = FitResultsToSite(results);
                 Console.WriteLine($"[Gemineachy] sending results for {results.Count} call(s), {results.Count(r => !r.Ok)} failed");
                 await Query(ToolProtocol.ResultsMarker, ToolProtocol.ResultsFileName, json);
                 Console.WriteLine("[Gemineachy] results delivered");
@@ -963,6 +963,30 @@ namespace Gemineachy.Services
             foreach (var call in ToolProtocol.ParseCalls(markedMessage))
                 results.Add(await InvokeToolCallAsync(call));
             return results;
+        }
+
+        /// <summary>
+        /// Serialize the results, trimming the largest string result (with a note) until the whole results message fits
+        /// the site's per-message limit. Re-measures the SERIALIZED JSON each pass: escaping grows text (newlines, and
+        /// non-ASCII as \uXXXX), so a character budget computed on the raw string would overshoot.
+        /// </summary>
+        private string FitResultsToSite(List<ToolResult> results)
+        {
+            var json = ToolProtocol.SerializeResults(results);
+            int limit = Site?.MaxMessageLength ?? 0;
+            int overhead = ToolProtocol.ResultsMarker.Length + ToolProtocol.ResultsFileName.Length + 32;
+            for (int pass = 0; limit > 0 && json.Length + overhead > limit && pass < 10; pass++)
+            {
+                var biggest = results.Where(r => r.Result is string).OrderByDescending(r => ((string)r.Result!).Length).FirstOrDefault();
+                if (biggest == null) break;
+                var s = (string)biggest.Result!;
+                var excess = json.Length + overhead - limit;
+                // Shrink by the excess plus room for the note; JSON escaping means a raw char can cost several.
+                biggest.Result = ToolProtocol.TruncatedResult(s, s.Length - excess * 2 - 400, limit);
+                json = ToolProtocol.SerializeResults(results);
+                Console.WriteLine($"[Gemineachy] trimmed a {s.Length}-char {biggest.Tool} result to fit the {limit}-char message limit (now {json.Length + overhead})");
+            }
+            return json;
         }
 
         /// <summary>One tool invocation's outcome, serialized back to Gemini as
@@ -1159,6 +1183,14 @@ namespace Gemineachy.Services
                 else _protocolIntroduced = false;
             }
             text = MaybeAttachFirstToolNote(text);
+            // A message over the site's limit would be cut by the page with no trace. Results are already fitted
+            // (FitResultsToSite); anything else that is still too long is cut HERE, visibly, and logged.
+            int maxLen = Site?.MaxMessageLength ?? 0;
+            if (maxLen > 0 && text.Length > maxLen)
+            {
+                Console.WriteLine($"[Gemineachy] message of {text.Length} chars exceeds {AgentName}'s {maxLen}-char limit; truncating");
+                text = text.Substring(0, maxLen - 120) + "\n…[message truncated to fit this chat site's per-message limit]";
+            }
             if (string.IsNullOrEmpty(text) && (files == null || files.Count() == 0))
             {
                 // nothing to send.

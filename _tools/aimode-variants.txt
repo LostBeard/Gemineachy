@@ -1,0 +1,4 @@
+Write a small C# console program that prints the numbers 1 to 5.
+Write a small C# console program that prints the numbers 1 to 5, and save it to /opfs/fstest/Count.cs.
+Write a small C# console program that prints the numbers 1 to 5, and save it with the helper to /opfs/fstest/Count.cs.
+Use the helper to list the files in /opfs/fstest.

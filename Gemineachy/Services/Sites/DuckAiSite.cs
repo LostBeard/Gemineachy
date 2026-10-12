@@ -35,6 +35,7 @@ namespace Gemineachy.Services.Sites
         // message it declined 4/4 new chats ("I can't write files from this chat"), yet a message whose ONLY ask
         // was to write the call was followed. So a new chat starts with a hidden warm-up round (2026-10-12).
         public bool IntroduceWithWarmUp => true;
+        public int MaxMessageLength => 0;   // no limit measured
 
         /// <summary>
         /// Click the sidebar's "New Chat" button. It has no stable id, data-* or aria attribute (only obfuscated

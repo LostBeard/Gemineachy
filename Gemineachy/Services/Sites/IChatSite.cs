@@ -43,6 +43,10 @@ namespace Gemineachy.Services.Sites
         /// </summary>
         bool IntroduceWithWarmUp { get; }
 
+        /// <summary>The most characters one message may carry on this site, or 0 when no limit is known. Tool
+        /// results longer than this are trimmed WITH a note telling the model to ask for less - never cut silently.</summary>
+        int MaxMessageLength { get; }
+
         /// <summary>Open a fresh, empty chat (used to retry a declined warm-up in a clean context). Returns
         /// false when the site has no way to do it.</summary>
         bool StartNewChat(Document document);

@@ -32,6 +32,18 @@
         "app/content.js"
       ],
       "all_frames": false
+    },
+    {
+      "matches": [
+        "https://www.google.com/search*"
+      ],
+      "include_globs": [
+        "*udm=50*"
+      ],
+      "js": [
+        "app/content.js"
+      ],
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -39,7 +51,8 @@
       "matches": [
         "https://gemini.google.com/*",
         "https://duck.ai/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://www.google.com/*"
       ],
       "resources": [
         "app/*"

@@ -33,6 +33,21 @@ window.__gemSite = (() => {
       // Signed out, the "New chat" link opens a login modal; a page load is the only way to a fresh chat.
       newChat: () => { location.href = 'https://chatgpt.com/'; },
     },
+    'www.google.com': {   // AI Mode (udm=50): queries are NOT inside their turns - query i pairs with turn i
+      user: 'span[role="heading"][aria-level="2"]', reply: '[data-scope-id="turn"]',
+      compose: 'textarea[maxlength="8192"]', send: 'button[data-xid="input-plate-send-button"]',
+      busy: () => {
+        const qs = document.querySelectorAll('span[role="heading"][aria-level="2"]').length;
+        const ts = [...document.querySelectorAll('[data-scope-id="turn"]')];
+        const t = ts[ts.length - 1];
+        // complete = feedback buttons present (a chat's FIRST turn never gets data-complete)
+        return qs > ts.length || (t && !t.querySelector('button[aria-label="Good response"]'));
+      },
+      userText: u => (u.textContent || '').trim(),
+      replyOf: u => { const qs = [...document.querySelectorAll('span[role="heading"][aria-level="2"]')]; return document.querySelectorAll('[data-scope-id="turn"]')[qs.indexOf(u)] || null; },
+      body: r => r.querySelector('h3[data-ignore-copy] + div') || r,
+      newChat: () => { location.href = 'https://www.google.com/search?udm=50'; },
+    },
   };
   return T[location.host] || null;
 })();

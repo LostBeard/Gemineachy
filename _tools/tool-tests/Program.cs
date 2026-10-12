@@ -238,6 +238,18 @@ var wfParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters
 }
 
 // ---------------------------------------------------------------------------------------------
+Console.WriteLine("== Message-limit truncation ==");
+{
+    var big = new string('x', 5000);
+    var t = ToolProtocol.TruncatedResult(big, 1000, 8192);
+    Check("truncated result keeps the requested prefix", t.StartsWith(new string('x', 1000)) && !t.StartsWith(new string('x', 1001)));
+    Check("truncation note says how much was cut and the limit", t.Contains("4000 more characters") && t.Contains("8192"), t.Substring(1000));
+    Check("truncation note tells the model to ask for less", t.Contains("Ask for less"));
+    Check("keep beyond the text clamps (no exception, nothing cut)", ToolProtocol.TruncatedResult("abc", 10, 8192).StartsWith("abc\n…[truncated: 0 more"));
+    Check("negative keep clamps to 0", ToolProtocol.TruncatedResult("abc", -5, 8192).StartsWith("\n…[truncated: 3 more"));
+}
+
+// ---------------------------------------------------------------------------------------------
 Console.WriteLine("== TryBindArguments ==");
 var writeParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters();
 JsonElement Json(string s) => JsonDocument.Parse(s).RootElement.Clone();

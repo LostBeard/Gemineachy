@@ -762,6 +762,19 @@ namespace Gemineachy.Services
             return false;
         }
 
+        /// <summary>
+        /// <paramref name="text"/> cut to its first <paramref name="keep"/> characters plus a note saying what was cut
+        /// and how to ask for less. Used when a tool result would push a message past the site's per-message limit
+        /// (Google AI Mode: 8192) - the model must know it saw part of the result, never be handed a silent cut.
+        /// </summary>
+        public static string TruncatedResult(string text, int keep, int limit)
+        {
+            keep = Math.Clamp(keep, 0, text.Length);
+            return text.Substring(0, keep)
+                + $"\n…[truncated: {text.Length - keep} more characters not shown - this chat site accepts at most {limit} "
+                + "characters per message. Ask for less: e.g. ReadFile with a smaller maxBytes, or SearchContent for the part you need.]";
+        }
+
         /// <summary>Serialize the results array to send back to Gemini.</summary>
         public static string SerializeResults(IEnumerable<object?> results) =>
             JsonSerializer.Serialize(results, ResultOptions);
