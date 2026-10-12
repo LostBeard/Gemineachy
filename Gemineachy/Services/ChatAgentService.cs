@@ -643,7 +643,7 @@ namespace Gemineachy.Services
             _protocolIntroduced = true;
             _announcedTools.Clear();
             foreach (var n in Tools.Keys) _announcedTools.Add(n);
-            return $"{text}\n\n{ToolProtocol.BuildFirstMessageToolNote()}";
+            return $"{text}\n\n{ToolProtocol.BuildFirstMessageToolNote(Site?.ToolNoteInExtensionVoice == true)}";
         }
 
         private void Mutation_Observed()

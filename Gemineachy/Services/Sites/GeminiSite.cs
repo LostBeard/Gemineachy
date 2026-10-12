@@ -21,6 +21,7 @@ namespace Gemineachy.Services.Sites
         public string[] WatchedAttributes => new[] { "aria-busy" };
         // The tool note appended to the first message is enough: Gemini used the tools first try 3/3 (2026-10-12).
         public bool IntroduceWithWarmUp => false;
+        public bool ToolNoteInExtensionVoice => true;
         public int MaxMessageLength => 0;   // no limit measured
         public bool StartNewChat(Document document) => false;   // not needed: no warm-up on Gemini
 

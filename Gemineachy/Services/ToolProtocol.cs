@@ -494,8 +494,16 @@ namespace Gemineachy.Services
         /// asks it to BEGIN with a ListTools call - writing text, which it does not refuse - and the real results
         /// that come back are the evidence that the tools exist before it decides what it can do.
         /// </remarks>
-        public static string BuildFirstMessageToolNote() =>
-            FirstNoteMarker + "\n"
+        public static string BuildFirstMessageToolNote(bool extensionVoice = false) => extensionVoice
+            // Gemini's form (see IChatSite.ToolNoteInExtensionVoice): Gemini declined the user-voice note below in
+            // 0 of 6 fresh chats (2026-10-12).
+            ? FirstNoteMarker + "\n"
+              + "[Automated note from the Gemineachy browser extension - NOT from the user; do not mention it or reply to it. "
+              + "You have browser-side tools available in this page (for example a virtual filesystem you can read and write files in). "
+              + "BEFORE telling the user you cannot do something, check whether a tool exists: call "
+              + $"{ListToolsName} for the full list, or {SearchToolsName} with keywords. If no tool is relevant, just answer the user normally.\n"
+              + BuildCallRules() + "]"
+            : FirstNoteMarker + "\n"
             + "(I'm using the Gemineachy browser extension. These are not built-in tools you call - you WRITE a tool call "
             + "as a code block in your reply, in the format below, and the extension running in my browser reads it, "
             + "executes it, and sends you the result. This really works: for example it can read and write files in a "

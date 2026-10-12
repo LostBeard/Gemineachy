@@ -50,6 +50,9 @@ measured, not assumed:
 - **Note hiding**: Duck renders a message as many text nodes in one `<p>`, so blank them in place.
 - **Turns re-render**: Gemini re-renders every turn and drops our seen-marker. `ChatAgentService` keeps ONE
   live turn and follows a same-text re-render, so a second turn must never start for it.
+- 🔴 **Prompt text is per-model - re-measure EVERY site after changing it.** The first-message note was rewritten
+  in the user's voice for Duck.ai and Gemini silently went from following it to 0/6; Gemini needs the extension
+  voice (`ToolNoteInExtensionVoice`), 4/4. Run `e2e-runs.sh` on each adapter after touching `ToolProtocol` text.
 - **Model adherence**: Gemini follows the tool note appended to the first message. Duck.ai's GPT model
   declines it ("I can't write files from here") 4/4, so `IntroduceWithWarmUp` sends a hidden warm-up
   first (wording A/B-measured; see `ToolProtocol.BuildWarmUpMessage`). A declined warm-up is retried

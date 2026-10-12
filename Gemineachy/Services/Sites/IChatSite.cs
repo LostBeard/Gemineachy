@@ -43,6 +43,11 @@ namespace Gemineachy.Services.Sites
         /// </summary>
         bool IntroduceWithWarmUp { get; }
 
+        /// <summary>True when this site's model follows the first-message tool note written as an automated note FROM
+        /// THE EXTENSION ("NOT from the user"); false for the user's own voice. It differs per model (2026-10-12):
+        /// Duck.ai's GPT treated the extension voice as third-party injection, while Gemini declined the user voice.</summary>
+        bool ToolNoteInExtensionVoice => false;
+
         /// <summary>The most characters one message may carry on this site, or 0 when no limit is known. Tool
         /// results longer than this are trimmed WITH a note telling the model to ask for less - never cut silently.</summary>
         int MaxMessageLength { get; }
