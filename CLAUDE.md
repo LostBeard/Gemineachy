@@ -12,7 +12,7 @@ Global rules: `D:\users\tj\Projects\CLAUDE.md`. Read those first.
 
 | harness | covers | last run |
 |---|---|---|
-| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 113/113 |
+| `_tools/tool-tests` | `ToolProtocol` (incl. fencing / `[Verbatim]`), `ToolCall`, `DelegateFormatter`, `VirtualFilePath`, `AgentToolAttribute`, `VerbatimAttribute` | 118/118 |
 | `_tools/checkers-tests` | `Games/CheckersGame.cs` | 45/45 |
 | `_tools/chess-tests` | `Games/ChessGame.cs` | 32/32 |
 

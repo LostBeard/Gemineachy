@@ -923,12 +923,6 @@ namespace Gemineachy.Services
             _lastRoundFailed = false;
         }
 
-        /// <summary>Order-sensitive signature of a round's calls (tool name + argument JSON), so an
-        /// identical repeat is recognizable regardless of surrounding prose or whitespace.</summary>
-        private static string RoundSignature(List<ToolProtocol.ParsedCall> calls) =>
-            string.Join("␞", calls.Select(c => c.ParseError != null
-                ? $"!{c.Raw}"
-                : $"{c.Tool}({(c.HasArgs ? c.Args.GetRawText() : "")})"));
 
         async Task HandleAgentMessage(string modelResponse)
         {
@@ -956,7 +950,7 @@ namespace Gemineachy.Services
 
                 // If the model just repeated a call identical to one that already failed, don't re-run
                 // it (same input -> same failure). Nudge it to change the call instead.
-                var sig = RoundSignature(calls);
+                var sig = ToolProtocol.RoundSignature(calls);
                 if (_lastRoundFailed && sig == _lastRoundSig)
                 {
                     _toolRounds++;

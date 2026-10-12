@@ -165,6 +165,19 @@ var wfParams = typeof(Sample).GetMethod(nameof(Sample.WriteFile))!.GetParameters
     Check("code marks never reach Raw", !c.Raw.Contains(ToolProtocol.CodeStart) && !c.Raw.Contains(ToolProtocol.CodeEnd), c.Raw);
 }
 {
+    // Loop guard: the same call JSON with a payload moved INTO a code block is a different round (Z.ai GLM fixed
+    // its layout this way and the JSON-only signature refused the fix as "identical").
+    const string call = "«TOOL_CALL {\"tool\":\"W\",\"args\":{\"path\":\"/opfs/a.cs\"}} »\n";
+    var prose = ToolProtocol.ParseCalls(call + "«PAYLOAD:content»\nx\n«/PAYLOAD:content»");
+    var fenced = ToolProtocol.ParseCalls(call + "«PAYLOAD:content»\n" + Code("x") + "\n«/PAYLOAD:content»");
+    Check("payload moved into a code block changes the round signature",
+        ToolProtocol.RoundSignature(prose) != ToolProtocol.RoundSignature(fenced));
+    Check("an exact repeat keeps the same signature",
+        ToolProtocol.RoundSignature(fenced) == ToolProtocol.RoundSignature(ToolProtocol.ParseCalls(call + "«PAYLOAD:content»\n" + Code("x") + "\n«/PAYLOAD:content»")));
+    var changed = ToolProtocol.ParseCalls(call + "«PAYLOAD:content»\n" + Code("y") + "\n«/PAYLOAD:content»");
+    Check("a different payload value changes the signature", ToolProtocol.RoundSignature(fenced) != ToolProtocol.RoundSignature(changed));
+}
+{
     // ```«TOOL_CALL - the marker became the fence's language label, which the scraper drops as chrome (Z.ai GLM).
     var calls = ToolProtocol.ParseCalls("\n" + Code("{\"tool\":\"ChatAgentService.ListTools\",\"args\":{}}\n»") + "\n");
     Check("call whose open marker was the fence label is recovered", calls.Count == 1 && calls[0].ParseError == null

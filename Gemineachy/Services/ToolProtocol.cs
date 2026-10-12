@@ -339,6 +339,26 @@ namespace Gemineachy.Services
             return calls;
         }
 
+        /// <summary>
+        /// Order-sensitive signature of a round's calls, for the loop guard that refuses to re-run a call identical
+        /// to one that just failed: tool name + argument JSON + the message's PAYLOAD blocks (value, and whether it
+        /// came from a code block). The payloads count because they ARE arguments: Z.ai's GLM fixed a refused
+        /// payload's layout (2026-10-12) and resent the same call JSON, and a JSON-only signature called the
+        /// corrected call "identical" and never ran it.
+        /// </summary>
+        public static string RoundSignature(IEnumerable<ParsedCall> calls)
+        {
+            var list = calls.ToList();
+            var calls0 = string.Join("␞", list.Select(c => c.ParseError != null
+                ? $"!{c.Raw}"
+                : $"{c.Tool}({(c.HasArgs ? c.Args.GetRawText() : "")})"));
+            var first = list.FirstOrDefault();   // payloads are message-level: every call shares the same set
+            if (first?.Payloads == null || first.Payloads.Count == 0) return calls0;
+            var payloads = string.Join("␞", first.Payloads.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(p => $"{p.Key}{(first.UnfencedPayloads?.Contains(p.Key) == true ? "~" : "=")}{p.Value}"));
+            return calls0 + "␝" + payloads;
+        }
+
         private static readonly Regex LabelledCallBody = new Regex(
             @"\A\s*\{.*""tool"".*\}\s*" + Regex.Escape(CallClose) + @"\s*\z", RegexOptions.Singleline | RegexOptions.Compiled);
 
