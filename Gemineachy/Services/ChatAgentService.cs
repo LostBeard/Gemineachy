@@ -662,6 +662,8 @@ namespace Gemineachy.Services
             public HTMLElement User = default!;
             public string Query = "";
             public TaskCompletionSource<string> Response = new();
+            /// <summary>When the reply was first seen "complete" yet empty (see EmptyReplyGraceMs).</summary>
+            public DateTime? EmptySince;
         }
         private LiveTurn? _liveTurn;
         /// <summary>The page is producing (or settling) a reply - per the site adapter's measured signals.</summary>
@@ -760,6 +762,15 @@ namespace Gemineachy.Services
 
         /// <summary>Complete the live turn once its reply has finished: run its tool calls, resolve its Query,
         /// and fire <see cref="OnQueryResponse"/>. Runs on every mutation; cheap when nothing is pending.</summary>
+        /// <summary>The event the page-world bridge (wwwroot/page-bridge.js) answers, and the attribute it answers in.</summary>
+        const string PageCodeEvent = "gemineachy-read-code";
+        const string PageCodeAttr = "data-gemineachy-code";
+
+        /// <summary>How long a reply that the site calls complete may still read EMPTY before it is accepted as
+        /// empty. ChatGPT flagged a warm-up reply complete before its text rendered (2026-10-12): it was read at 0
+        /// chars, the warm-up was judged declined although the model had written the ListTools call.</summary>
+        const double EmptyReplyGraceMs = 10000;
+
         private void CheckLiveTurn()
         {
             var turn = _liveTurn;
@@ -767,7 +778,6 @@ namespace Gemineachy.Services
             if (IsProcessing()) return;
             using var reply = Site.FindReply(turn.User);
             if (reply == null || !Site.IsReplyComplete(_document, reply)) return;
-            _liveTurn = null;
             // Read the whole message body via TextContent, NOT innerText and NOT a join of <p> elements.
             // TextContent includes code blocks and, crucially, still returns the text when the element is hidden -
             // which it IS once EarlyHideToolTraffic hides a tool-call reply. innerText is layout-dependent and
@@ -777,6 +787,13 @@ namespace Gemineachy.Services
             // what was fenced); everyone else gets the plain text.
             var markedResponse = ReadMessageText(contentNode);
             var modelResponse = ToolProtocol.StripCodeMarks(markedResponse);
+            // "Complete" but nothing rendered yet: wait for the text (a later mutation re-checks), within a grace period.
+            if (string.IsNullOrWhiteSpace(modelResponse))
+            {
+                turn.EmptySince ??= DateTime.UtcNow;
+                if ((DateTime.UtcNow - turn.EmptySince.Value).TotalMilliseconds < EmptyReplyGraceMs) return;
+            }
+            _liveTurn = null;
             _ = HandleAgentMessage(markedResponse);
             turn.Response.TrySetResult(modelResponse);
             OnQueryResponse?.Invoke(turn.Query, modelResponse);
@@ -801,9 +818,6 @@ namespace Gemineachy.Services
         /// costs no correctness if it never changes. The surrounding newlines put the code on its own
         /// lines, which TextContent's element-boundary-free concatenation would otherwise deny it.
         /// </remarks>
-        /// <summary>The event the page-world bridge (wwwroot/page-bridge.js) answers, and the attribute it answers in.</summary>
-        const string PageCodeEvent = "gemineachy-read-code";
-        const string PageCodeAttr = "data-gemineachy-code";
         private string ReadMessageText(HTMLElement? contentNode)
         {
             if (contentNode == null || Site == null) return "";
